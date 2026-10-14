@@ -8,10 +8,13 @@ import type { AppSettings } from "./utils/settings";
 import type { RecordingAudio } from "./audio/useRecordingAudio";
 import { estimateCost, type Usage } from "./config/models";
 import { placeLinesByLength, snapLinesToPauses, pausesOf } from "./audio/segmentation";
-import { sliceClip, wavForTranscription } from "./audio/audioTools";
+import { wavForTranscription } from "./audio/audioTools";
+import { buildLineClip, type AudioSources } from "./audio/clipBuilder";
 import { newId } from "./utils/projectStore";
 import * as api from "./utils/api";
 import type { VideoLine } from "./render/renderLesson";
+import { themeFor } from "./render/themes";
+import type { TranscribeMode } from "./config/transcribeModes";
 
 export function addUsage(totals: UsageTotals, model: string, usage: Usage): UsageTotals {
   return {
@@ -22,6 +25,17 @@ export function addUsage(totals: UsageTotals, model: string, usage: Usage): Usag
   };
 }
 
+/**
+ * How a project's recording is transcribed: a dialogue gets speakers, and a
+ * recording of a known text (a story, a script) is aligned to that text
+ * rather than transcribed from scratch.
+ */
+export function transcribeModeFor(project: Project): TranscribeMode {
+  if (project.kind === "dialogue") return "dialogue";
+  if (project.script?.some((l) => l.trim())) return "aligned";
+  return "lines";
+}
+
 /** Step 1 → 2: hear the recording, and place every line in it. */
 export async function transcribeRecording(
   project: Project,
@@ -29,6 +43,7 @@ export async function transcribeRecording(
   settings: AppSettings
 ): Promise<(current: Project) => Partial<Project>> {
   const wav = await wavForTranscription(audio.buffer);
+  const mode = transcribeModeFor(project);
   const result = await api.transcribe({
     wav,
     durationSeconds: audio.buffer.duration,
@@ -36,6 +51,9 @@ export async function transcribeRecording(
     context: project.context,
     model: settings.transcribeModel,
     apiKey: settings.apiKey,
+    mode,
+    knownLines: mode === "aligned" ? project.script : undefined,
+    speakers: project.kind === "dialogue" ? project.speakers.map((s) => s.name) : undefined,
   });
 
   if (!result.lines.length) {
@@ -58,10 +76,13 @@ export async function transcribeRecording(
     end: ranges[i].end,
     transliteration: "",
     translations: {},
+    ...(project.kind === "dialogue" ? { speaker: line.speaker ?? 0 } : {}),
+    ...(project.kind === "story" && (line.paragraphStart || i === 0) ? { paragraphStart: true } : {}),
   }));
 
   return (current) => ({
     lines,
+    cuts: [],
     timesSource: result.timesTrusted ? "model" : "audio",
     titles: {},
     captions: {},
@@ -116,6 +137,7 @@ export async function translateLines(
     apiKey: settings.apiKey,
     withTitles: !partial,
     surrounding: partial ? project.lines.filter((l) => !targets.includes(l)).map((l) => l.kurdish) : undefined,
+    kind: project.kind,
   });
 
   const sent = new Map(targets.map((l, i) => [l.id, { kurdish: l.kurdish, got: result.lines[i] }]));
@@ -209,16 +231,30 @@ export function mergeLines(a: LessonLine, b: LessonLine): LessonLine {
   };
 }
 
-/** The lines that go into the video, each with its own clip of your voice. */
-export function videoLinesFrom(project: Project, audio: RecordingAudio): VideoLine[] {
-  return project.lines
-    .filter((l) => !l.skip && l.kurdish.trim() && l.end > l.start)
-    .map((l) => ({
+/**
+ * The lines that go into the video, each with its finished clip of your voice
+ * (its take if it has one, cuts removed, pauses tightened). Lines whose audio
+ * is not loaded yet are left out rather than played silent.
+ */
+export function videoLinesFrom(project: Project, sources: AudioSources): VideoLine[] {
+  const out: VideoLine[] = [];
+  let paragraph = -1;
+  project.lines.forEach((l, index) => {
+    if (l.paragraphStart || index === 0) paragraph++;
+    if (l.skip || !l.kurdish.trim() || (!l.take && l.end <= l.start)) return;
+    const clip = buildLineClip(l, sources, project);
+    if (!clip) return;
+    out.push({
+      id: l.id,
       kurdish: l.kurdish.trim(),
       transliteration: l.transliteration.trim(),
       translations: l.translations,
-      clip: sliceClip(audio.buffer, l.start, l.end, audio.gain),
-    }));
+      clip,
+      speaker: l.speaker ?? 0,
+      paragraph: Math.max(0, paragraph),
+    });
+  });
+  return out;
 }
 
 /**
@@ -226,11 +262,25 @@ export function videoLinesFrom(project: Project, audio: RecordingAudio): VideoLi
  * video made before an edit can be marked as out of date.
  */
 export function fingerprint(project: Project, languages: string[]): string {
-  const { outputs: _outputs, resolution: _resolution, ...look } = project.video;
+  const { outputs: _outputs, resolution: _resolution, themes: _themes, ...look } = project.video;
+  const card = (c: Project["intro"]) => [
+    c.enabled,
+    c.audio,
+    languages.map((id) => c.text[id] || ""),
+    languages.map((id) => (c.clips[id] ? `${c.clips[id].blob.size}:${c.clips[id].durationSeconds}` : "")),
+  ];
   const material = JSON.stringify({
+    kind: project.kind,
     languages,
     look,
+    theme: themeFor(project.video.themes, languages),
     titles: languages.map((id) => project.titles[id] || ""),
+    speakers: project.kind === "dialogue" ? project.speakers.map((s) => s.name) : undefined,
+    intro: card(project.intro),
+    outro: card(project.outro),
+    cuts: project.cuts.map((c) => [Math.round(c.start * 100), Math.round(c.end * 100)]),
+    fx: project.audioFx,
+    processed: project.processed?.key,
     lines: project.lines
       .filter((l) => !l.skip)
       .map((l) => [
@@ -239,6 +289,9 @@ export function fingerprint(project: Project, languages: string[]): string {
         languages.map((id) => l.translations[id] || ""),
         Math.round(l.start * 100),
         Math.round(l.end * 100),
+        l.take ? `${l.take.id}:${Math.round(l.take.start * 100)}:${Math.round(l.take.end * 100)}:${l.take.processed?.key ?? ""}` : "",
+        l.speaker ?? 0,
+        l.paragraphStart ? 1 : 0,
       ]),
   });
   let hash = 5381;

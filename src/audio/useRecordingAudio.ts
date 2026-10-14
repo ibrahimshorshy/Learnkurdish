@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { Recording } from "../types";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { Project } from "../types";
 import { analyzeSpeech, type SpeechAnalysis } from "../render/audioAlign";
-import { audioContext, decodeAudio, levellingGain, playRange, stopPlayback, toMono } from "./audioTools";
+import { audioContext, decodeAudio, levellingGain, stopPlayback, toMono } from "./audioTools";
+import type { AudioSources } from "./clipBuilder";
 
 export interface RecordingAudio {
   buffer: AudioBuffer;
@@ -12,7 +13,7 @@ export interface RecordingAudio {
   gain: number;
 }
 
-/** Decoding is the slow part, so each recording Blob is decoded once. */
+/** Decoding is the slow part, so each Blob is decoded once. */
 const cache = new WeakMap<Blob, Promise<RecordingAudio>>();
 
 export function loadRecordingAudio(blob: Blob): Promise<RecordingAudio> {
@@ -33,11 +34,9 @@ export function loadRecordingAudio(blob: Blob): Promise<RecordingAudio> {
   return pending;
 }
 
-export function useRecordingAudio(recording: Recording | undefined) {
+function useDecoded(blob: Blob | undefined): { audio: RecordingAudio | null; error: string | null } {
   const [audio, setAudio] = useState<RecordingAudio | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const blob = recording?.blob;
-
   useEffect(() => {
     let live = true;
     setError(null);
@@ -52,19 +51,71 @@ export function useRecordingAudio(recording: Recording | undefined) {
       live = false;
     };
   }, [blob]);
-
   return { audio, error };
 }
 
+export interface LessonAudio {
+  /** The main recording as recorded — what the waveform shows. */
+  raw: RecordingAudio | null;
+  /** What the lines and the video use: the cleaned-up recording when there is one, else the raw. */
+  sources: AudioSources;
+  error: string | null;
+}
+
 /**
- * Plays stretches of the recording and reports where the playhead is, so the
- * waveform and the line list can follow along.
+ * Everything a project sounds like, decoded: the main recording, its cleaned-up
+ * version, and every re-recorded take.
+ *
+ * The cleaned-up versions are used once they exist; making them (and noticing
+ * when they are out of date) is the audio clean-up's job.
  */
-export function usePlayback(audio: RecordingAudio | null) {
+export function useLessonAudio(project: Project | null): LessonAudio {
+  const raw = useDecoded(project?.recording?.blob);
+  const processed = useDecoded(project?.processed?.blob);
+
+  const takeBlobs = useMemo(
+    () =>
+      (project?.lines ?? [])
+        .filter((l) => l.take)
+        .map((l) => ({ id: l.take!.id, blob: l.take!.processed?.blob ?? l.take!.blob })),
+    [project?.lines]
+  );
+
+  const [takes, setTakes] = useState<Map<string, RecordingAudio>>(new Map());
+  useEffect(() => {
+    let live = true;
+    Promise.all(
+      takeBlobs.map((t) =>
+        loadRecordingAudio(t.blob)
+          .then((a) => [t.id, a] as const)
+          .catch(() => null)
+      )
+    ).then((entries) => {
+      if (!live) return;
+      setTakes(new Map(entries.filter(Boolean) as [string, RecordingAudio][]));
+    });
+    return () => {
+      live = false;
+    };
+  }, [takeBlobs]);
+
+  const sources = useMemo<AudioSources>(
+    () => ({ main: processed.audio ?? raw.audio, takes }),
+    [processed.audio, raw.audio, takes]
+  );
+
+  return { raw: raw.audio, sources, error: raw.error };
+}
+
+/**
+ * Plays finished line clips and reports where the playhead is in the main
+ * recording, so the waveform and the line list can follow along.
+ */
+export function usePlayback() {
   const [playing, setPlaying] = useState<{ key: string; start: number; end: number } | null>(null);
   const [position, setPosition] = useState<number | null>(null);
   const rafRef = useRef<number | null>(null);
-  const startedRef = useRef(0);
+  const sourceRef = useRef<AudioBufferSourceNode | null>(null);
 
   const halt = useCallback(() => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
@@ -74,30 +125,56 @@ export function usePlayback(audio: RecordingAudio | null) {
   }, []);
 
   const stop = useCallback(() => {
+    const source = sourceRef.current;
+    sourceRef.current = null;
+    if (source) {
+      source.onended = null;
+      try {
+        source.stop();
+      } catch {
+        /* already stopped */
+      }
+    }
     stopPlayback();
     halt();
   }, [halt]);
 
+  /**
+   * Plays `clip`. `span` is where it sits in the main recording, for the
+   * playhead; a clip with cuts or tightened pauses maps onto it proportionally.
+   */
   const play = useCallback(
-    async (key: string, start: number, end: number) => {
-      if (!audio) return;
-      stopPlayback();
-      halt();
+    async (key: string, clip: AudioBuffer, span?: { start: number; end: number }) => {
+      stop();
       const ctx = audioContext();
-      setPlaying({ key, start, end });
-      await playRange(audio.buffer, start, end, halt, audio.gain);
-      startedRef.current = ctx.currentTime;
+      if (ctx.state === "suspended") await ctx.resume();
+      const source = ctx.createBufferSource();
+      source.buffer = clip;
+      source.connect(ctx.destination);
+      sourceRef.current = source;
+      const range = span ?? { start: 0, end: clip.duration };
+      setPlaying({ key, ...range });
+      source.onended = () => {
+        if (sourceRef.current === source) {
+          sourceRef.current = null;
+          halt();
+        }
+      };
+      const started = ctx.currentTime;
+      source.start();
       const tick = () => {
-        const t = start + (ctx.currentTime - startedRef.current);
-        setPosition(Math.min(end, t));
+        const fraction = Math.min(1, (ctx.currentTime - started) / Math.max(0.01, clip.duration));
+        setPosition(range.start + fraction * (range.end - range.start));
         rafRef.current = requestAnimationFrame(tick);
       };
       rafRef.current = requestAnimationFrame(tick);
     },
-    [audio, halt]
+    [halt, stop]
   );
 
-  useEffect(() => () => stopPlayback(), []);
+  useEffect(() => () => stop(), [stop]);
 
   return { playing, position, play, stop };
 }
+
+export type Playback = ReturnType<typeof usePlayback>;

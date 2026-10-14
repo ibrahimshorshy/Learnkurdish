@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Mic, Pause, Play, Square, Upload, Wand2, RotateCcw, Loader2, Info } from "lucide-react";
 import type { Project } from "../types";
 import type { AppSettings } from "../utils/settings";
@@ -6,26 +6,53 @@ import type { RecordingAudio } from "../audio/useRecordingAudio";
 import { useRecorder } from "../audio/useRecorder";
 import { decodeAudio, formatTime } from "../audio/audioTools";
 import { findTextModel } from "../config/models";
+import { useObjectUrl } from "../utils/useObjectUrl";
 
-interface Props {
+export interface RecordStepProps {
   project: Project;
   settings: AppSettings;
+  /** The main recording as recorded. */
   audio: RecordingAudio | null;
   audioError: string | null;
   busy: boolean;
-  update: (patch: Partial<Project>) => void;
+  update: (patch: Partial<Project> | ((p: Project) => Partial<Project>)) => void;
   onTranscribe: () => void;
 }
 
-export default function RecordStep({ project, settings, audio, audioError, busy, update, onTranscribe }: Props) {
+const COPY: Record<string, { title: string; tip: string; how: string[] }> = {
+  lesson: {
+    title: "Record your Kurdish",
+    tip: "Say each sentence clearly, then pause for about a second before the next one.",
+    how: [
+      "Record the sentences for one lesson in Kurdish Sorani — five to twenty is a good size.",
+      "The AI writes down what you said, one line per sentence, and finds each line in your recording.",
+      "Add a note if you want — what to focus on — then it translates every line into Arabic and English.",
+      "You proof everything. Nothing goes into a video until you approve it.",
+      "Get one MP4 per language: your voice, the Kurdish, how to say it, and what it means.",
+    ],
+  },
+  dialogue: {
+    title: "Record your dialogue",
+    tip: "Two people talking — or you voicing both. Leave a short pause each time the speaker changes.",
+    how: [
+      "Record the whole conversation in one go, or upload it.",
+      "The AI writes down every line and guesses who said it. You can switch any line to the other speaker.",
+      "Name the two speakers if you like, add a note, and translate.",
+      "Proof everything, then approve.",
+      "Get a chat-thread video: each line on its speaker's side, in your voices.",
+    ],
+  },
+};
+
+export default function RecordStep({ project, settings, audio, audioError, busy, update, onTranscribe }: RecordStepProps) {
+  const copy = COPY[project.kind] ?? COPY.lesson;
   const recorder = useRecorder({ noiseSuppression: settings.noiseSuppression });
   const fileRef = useRef<HTMLInputElement>(null);
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
 
   const recording = project.recording;
-  const url = useMemo(() => (recording ? URL.createObjectURL(recording.blob) : null), [recording]);
-  useEffect(() => () => void (url && URL.revokeObjectURL(url)), [url]);
+  const url = useObjectUrl(recording?.blob);
 
   const hasWork = project.lines.length > 0;
 
@@ -44,6 +71,8 @@ export default function RecordStep({ project, settings, audio, audioError, busy,
           fileName,
         },
         lines: [],
+        cuts: [],
+        processed: undefined,
         titles: {},
         captions: {},
         renders: [],
@@ -87,10 +116,8 @@ export default function RecordStep({ project, settings, audio, audioError, busy,
     <div className="grid gap-5 lg:grid-cols-[1.15fr_1fr]">
       <section className="card p-6 flex flex-col items-center text-center gap-5">
         <div>
-          <h2 className="text-xl font-bold">Record your Kurdish</h2>
-          <p className="text-sm text-paper/60 mt-1">
-            Say each sentence clearly, then pause for about a second before the next one.
-          </p>
+          <h2 className="text-xl font-bold">{copy.title}</h2>
+          <p className="text-sm text-paper/60 mt-1">{copy.tip}</p>
         </div>
 
         <button
@@ -235,11 +262,9 @@ export default function RecordStep({ project, settings, audio, audioError, busy,
               <Info size={13} /> How it works
             </p>
             <ol className="space-y-3 list-decimal list-inside marker:text-brand-blue">
-              <li>Record the sentences for one lesson in Kurdish Sorani — five to twenty is a good size.</li>
-              <li>The AI writes down what you said, one line per sentence, and finds each line in your recording.</li>
-              <li>Add a note if you want — what to focus on — then it translates every line into Arabic and English.</li>
-              <li>You proof everything. Nothing goes into a video until you approve it.</li>
-              <li>Get one MP4 per language: your voice, the Kurdish, how to say it, and what it means.</li>
+              {copy.how.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
             </ol>
             <p className="text-xs text-paper/45">
               Your voice is the audio. Nothing in the video is synthesized — AI voices mispronounce Kurdish.

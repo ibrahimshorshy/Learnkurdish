@@ -36,12 +36,27 @@ export interface RawTranscriptLine {
   text?: unknown;
   start?: unknown;
   end?: unknown;
+  /** Dialogue: 0 or 1. */
+  speaker?: unknown;
+  /** Story: starts a new paragraph. */
+  paragraphStart?: unknown;
 }
 
 export interface TranscriptLine {
   text: string;
   start: number;
   end: number;
+  speaker?: number;
+  paragraphStart?: boolean;
+}
+
+/** Keeps the optional per-line fields a mode may set, dropping anything malformed. */
+function extras(line: RawTranscriptLine | undefined): Pick<TranscriptLine, "speaker" | "paragraphStart"> {
+  const out: Pick<TranscriptLine, "speaker" | "paragraphStart"> = {};
+  const speaker = Number(line?.speaker);
+  if (line?.speaker !== undefined && line?.speaker !== null && (speaker === 0 || speaker === 1)) out.speaker = speaker;
+  if (line?.paragraphStart === true) out.paragraphStart = true;
+  return out;
 }
 
 export interface NormalizedTranscript {
@@ -72,6 +87,7 @@ export function normalizeTranscript(raw: RawTranscriptLine[], durationSeconds: n
       text: cleanLineText(String(line?.text ?? "")),
       start: parseTimestamp(line?.start),
       end: parseTimestamp(line?.end),
+      ...extras(line),
     }))
     .filter((line) => line.text.length > 0);
 
@@ -104,7 +120,7 @@ export function normalizeTranscript(raw: RawTranscriptLine[], durationSeconds: n
     const step = span / parsed.length;
     return {
       lines: parsed.map((line, i) => ({
-        text: line.text,
+        ...line,
         start: i * step,
         end: (i + 1) * step,
       })),
@@ -114,7 +130,7 @@ export function normalizeTranscript(raw: RawTranscriptLine[], durationSeconds: n
 
   const lines = parsed
     .map((line) => ({
-      text: line.text,
+      ...line,
       start: Math.min(line.start as number, duration),
       end: Math.min(line.end as number, duration),
     }))

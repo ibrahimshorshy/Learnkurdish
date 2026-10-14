@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ZoomIn, ZoomOut } from "lucide-react";
-import type { LessonLine } from "../types";
+import type { LessonLine, TimeRange } from "../types";
 import { waveformPeaks, formatTime } from "../audio/audioTools";
 
 interface Props {
@@ -13,6 +13,9 @@ interface Props {
   onPlayLine: (line: LessonLine) => void;
   /** Called while an edge is dragged. */
   onRetime: (id: string, range: { start: number; end: number }) => void;
+  /** Removed stretches of the recording, drawn struck out. Omit to hide cutting entirely. */
+  cuts?: TimeRange[];
+  onCutsChange?: (cuts: TimeRange[]) => void;
 }
 
 const HEIGHT = 132;
@@ -33,6 +36,7 @@ export default function WaveformEditor({
   onSelect,
   onPlayLine,
   onRetime,
+  cuts,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -117,11 +121,32 @@ export default function WaveformEditor({
       ctx.fillText(formatTime(t, 0), x + 3, HEIGHT - 1);
     }
 
+    // Cut regions: struck out, so it is obvious they will not be heard.
+    for (const cut of cuts ?? []) {
+      const x0 = cut.start * pxPerSecond;
+      const x1 = cut.end * pxPerSecond;
+      ctx.fillStyle = "rgba(224, 49, 58, 0.22)";
+      ctx.fillRect(x0, 16, Math.max(1, x1 - x0), HEIGHT - 16);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x0, 16, Math.max(1, x1 - x0), HEIGHT - 16);
+      ctx.clip();
+      ctx.strokeStyle = "rgba(224, 49, 58, 0.7)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let x = x0 - HEIGHT; x < x1; x += 7) {
+        ctx.moveTo(x, HEIGHT);
+        ctx.lineTo(x + HEIGHT - 16, 16);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
     if (playhead !== null) {
       ctx.fillStyle = "#FDC82F";
       ctx.fillRect(playhead * pxPerSecond - 1, 0, 2, HEIGHT);
     }
-  }, [peaks, lines, selectedId, playhead, width, pxPerSecond, duration]);
+  }, [peaks, lines, selectedId, playhead, width, pxPerSecond, duration, cuts]);
 
   const timeAt = (clientX: number) => {
     const rect = canvasRef.current!.getBoundingClientRect();

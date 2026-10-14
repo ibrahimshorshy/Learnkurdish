@@ -1,29 +1,33 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Clapperboard, Download, Loader2, Play, Square, Trash2, AlertTriangle, Copy, Check, X } from "lucide-react";
+import { Clapperboard, Loader2, Play, Square, AlertTriangle, X } from "lucide-react";
 import type { Project, RenderedVideo, VideoSettings } from "../types";
-import type { RecordingAudio } from "../audio/useRecordingAudio";
-import { THEMES, THEME_ORDER } from "../render/themes";
+import type { AudioSources } from "../audio/clipBuilder";
+import type { AppSettings } from "../utils/settings";
+import { THEMES, THEME_ORDER, themeFor } from "../render/themes";
 import {
   RESOLUTIONS,
   drawStill,
-  prepareLesson,
   renderVideo,
   startPreview,
   stillMoment,
+  type LessonLook,
   type PreparedLesson,
   type PreviewHandle,
   type ResolutionId,
 } from "../render/renderLesson";
-import { findAudienceLanguage } from "../config/languages";
+import { prepareOutput } from "../render/kinds";
+import { loadCardsInput } from "../render/cards";
 import { fingerprint, outputKey, videoLinesFrom } from "../lessonActions";
-import { newId, formatBytes } from "../utils/projectStore";
+import { newId, speakerName } from "../utils/projectStore";
 import { asciiFileName, downloadBlob } from "../utils/download";
-import { formatTime } from "../audio/audioTools";
-import { stopPlayback } from "../audio/audioTools";
+import { formatTime, stopPlayback } from "../audio/audioTools";
+import { ErrorNote, Field, Segmented, Slider, Toggle, VideoCard, languagesLabel } from "./ui";
+import IntroOutroPanel from "./IntroOutroPanel";
 
 interface Props {
   project: Project;
-  audio: RecordingAudio | null;
+  sources: AudioSources;
+  settings: AppSettings;
   ffmpeg: boolean | null;
   logoSrc: string;
   update: (patch: Partial<Project> | ((p: Project) => Partial<Project>)) => void;
@@ -31,16 +35,28 @@ interface Props {
 
 const PREVIEW_WIDTH = 540;
 
-export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: Props) {
+/** Every video that can be made: one per language, plus all of them together. */
+export function outputChoices(audiences: string[]): string[][] {
+  const single = audiences.map((id) => [id]);
+  return audiences.length > 1 ? [...single, [...audiences]] : single;
+}
+
+export function videoFileName(project: Project, languages: string[]): string {
+  const base = asciiFileName(project.titles.en || project.name || "", `kurdish-${project.kind}`)
+    .replace(/\s+/g, "-")
+    .toLowerCase();
+  return `${base}-${languages.join("-")}.mp4`;
+}
+
+/**
+ * The last step for lessons, dialogues and stories: pick the look, preview it
+ * with sound, and make one MP4 per chosen output.
+ */
+export default function OutputStep({ project, sources, settings, ffmpeg, logoSrc, update }: Props) {
   const v = project.video;
   const setVideo = (patch: Partial<VideoSettings>) => update((p) => ({ video: { ...p.video, ...patch } }));
 
-  // Every video that can be made: one per language, plus all of them together.
-  const choices = useMemo(() => {
-    const single = project.audiences.map((id) => [id]);
-    return project.audiences.length > 1 ? [...single, [...project.audiences]] : single;
-  }, [project.audiences]);
-
+  const choices = useMemo(() => outputChoices(project.audiences), [project.audiences]);
   const chosen = new Set(v.outputs.map(outputKey));
   const toggleOutput = (langs: string[]) => {
     const key = outputKey(langs);
@@ -48,10 +64,27 @@ export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: P
     setVideo({ outputs: next });
   };
 
-  const [previewLangs, setPreviewLangs] = useState<string[]>(() => v.outputs[0] ?? [project.audiences[0]]);
+  // The output being previewed is also the one whose look is being edited.
+  const [current, setCurrent] = useState<string[]>(() => v.outputs[0] ?? [project.audiences[0]]);
   useEffect(() => {
-    if (!project.audiences.includes(previewLangs[0])) setPreviewLangs([project.audiences[0]]);
-  }, [project.audiences, previewLangs]);
+    if (!current.every((id) => project.audiences.includes(id))) setCurrent([project.audiences[0]]);
+  }, [project.audiences, current]);
+  const currentTheme = themeFor(v.themes, current);
+
+  const lookFor = (languages: string[]): LessonLook => ({
+    theme: themeFor(v.themes, languages),
+    plays: v.plays,
+    repeatGapMode: v.repeatGapMode,
+    repeatGapSeconds: v.repeatGapSeconds,
+    gapBetweenLines: v.gapBetweenLines,
+    showTransliteration: v.showTransliteration,
+    karaoke: v.karaoke,
+    storyTranslation: v.storyTranslation,
+  });
+
+  const lines = useMemo(() => videoLinesFrom(project, sources), [project.lines, project.cuts, project.audioFx, sources]); // eslint-disable-line react-hooks/exhaustive-deps
+  const missingAudio = project.lines.filter((l) => !l.skip && l.kurdish.trim()).length - lines.length;
+  const speakers = project.speakers.map((_, i) => speakerName(project, i));
 
   /* ---------- preview ---------- */
 
@@ -60,41 +93,29 @@ export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: P
   const [prepared, setPrepared] = useState<PreparedLesson | null>(null);
   const [previewTime, setPreviewTime] = useState<number | null>(null);
 
-  const lines = useMemo(() => (audio ? videoLinesFrom(project, audio) : []), [project.lines, audio]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const look = useMemo(
-    () => ({
-      theme: v.theme,
-      plays: v.plays,
-      repeatGapMode: v.repeatGapMode,
-      repeatGapSeconds: v.repeatGapSeconds,
-      gapBetweenLines: v.gapBetweenLines,
-      intro: v.intro,
-      outro: v.outro,
-      showTransliteration: v.showTransliteration,
-      karaoke: v.karaoke,
-    }),
-    [v.theme, v.plays, v.repeatGapMode, v.repeatGapSeconds, v.gapBetweenLines, v.intro, v.outro, v.showTransliteration, v.karaoke]
-  );
-
+  const previewKey = JSON.stringify([lookFor(current), current, project.titles, speakers, project.intro, project.outro]);
   useEffect(() => {
     if (!lines.length) return;
     let live = true;
     previewRef.current?.stop();
-    const timer = setTimeout(() => {
-      prepareLesson({ width: PREVIEW_WIDTH, lines, languages: previewLangs, titles: project.titles, look, logoSrc }).then(
-        (p) => {
-          if (!live) return;
-          setPrepared(p);
-          if (canvasRef.current) drawStill(p, canvasRef.current, stillMoment(p));
-        }
+    previewRef.current = null;
+    setPreviewTime(null);
+    const timer = setTimeout(async () => {
+      const cards = await loadCardsInput(project, current);
+      const p = await prepareOutput(
+        project.kind,
+        { width: PREVIEW_WIDTH, lines, languages: current, titles: project.titles, look: lookFor(current), logoSrc, speakers },
+        cards
       );
+      if (!live) return;
+      setPrepared(p);
+      if (canvasRef.current) drawStill(p, canvasRef.current, stillMoment(p));
     }, 150);
     return () => {
       live = false;
       clearTimeout(timer);
     };
-  }, [lines, previewLangs, project.titles, look, logoSrc]);
+  }, [lines, previewKey, logoSrc]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => () => previewRef.current?.stop(), []);
 
@@ -125,27 +146,32 @@ export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: P
   const abortRef = useRef<AbortController | null>(null);
 
   const makeVideos = async () => {
-    if (!audio || !lines.length) return;
+    if (!lines.length) return;
     previewRef.current?.stop();
     previewRef.current = null;
     setError(null);
     const controller = new AbortController();
     abortRef.current = controller;
     const outputs = v.outputs.filter((o) => o.every((id) => project.audiences.includes(id)));
-    const made: RenderedVideo[] = [];
     try {
       for (let i = 0; i < outputs.length; i++) {
         const langs = outputs[i];
-        const label = langs.map((id) => findAudienceLanguage(id)?.label ?? id).join(" + ");
+        const label = languagesLabel(langs);
         setJob({ label, progress: 0, index: i, count: outputs.length });
-        const lesson = await prepareLesson({
-          width: RESOLUTIONS[v.resolution].width,
-          lines,
-          languages: langs,
-          titles: project.titles,
-          look,
-          logoSrc,
-        });
+        const cards = await loadCardsInput(project, langs);
+        const lesson = await prepareOutput(
+          project.kind,
+          {
+            width: RESOLUTIONS[v.resolution].width,
+            lines,
+            languages: langs,
+            titles: project.titles,
+            look: lookFor(langs),
+            logoSrc,
+            speakers,
+          },
+          cards
+        );
         const result = await renderVideo(
           lesson,
           (progress) => setJob({ label, progress, index: i, count: outputs.length }),
@@ -159,36 +185,26 @@ export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: P
           durationSeconds: result.durationSeconds,
           fingerprint: fingerprint(project, langs),
         };
-        made.push(video);
         // Save each one as it lands, so a failure later keeps the earlier ones.
         update((p) => ({
           renders: [video, ...p.renders.filter((r) => outputKey(r.languages) !== outputKey(langs))],
         }));
       }
     } catch (err) {
-      if ((err as DOMException)?.name !== "AbortError") {
-        setError(err instanceof Error ? err.message : String(err));
-      }
+      if ((err as DOMException)?.name !== "AbortError") setError(err instanceof Error ? err.message : String(err));
     } finally {
       setJob(null);
       abortRef.current = null;
     }
   };
 
-  const fileName = (video: RenderedVideo) => {
-    const base = asciiFileName(project.titles.en || project.name || "", "kurdish-lesson")
-      .replace(/\s+/g, "-")
-      .toLowerCase();
-    return `${base}-${video.languages.join("-")}.mp4`;
-  };
-
-  const notReady = !project.approvedAt;
   const totalSeconds = prepared?.timeline.total ?? 0;
+  const isLesson = project.kind === "lesson";
 
   return (
     <div className="grid gap-5 lg:grid-cols-[1fr_340px]">
       <div className="space-y-5 order-2 lg:order-1">
-        {notReady && (
+        {!project.approvedAt && (
           <div className="card !border-kurd-sun/40 p-4 text-sm flex items-center gap-2">
             <AlertTriangle size={16} className="text-kurd-sun shrink-0" />
             The translations were edited after approval, or never approved. You can still make videos — check them first.
@@ -196,16 +212,22 @@ export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: P
         )}
 
         <section className="card p-5 space-y-4">
-          <h2 className="text-lg font-bold">Look</h2>
-          <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="text-lg font-bold">Look</h2>
+            <span className="text-xs text-paper/55">
+              Background for the <b className="text-paper/85">{languagesLabel(current)}</b> video — pick the video on the
+              right to change another.
+            </span>
+          </div>
+          <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-2">
             {THEME_ORDER.map((id) => {
               const theme = THEMES[id];
-              const on = v.theme === id;
+              const on = currentTheme === id;
               return (
                 <button
                   key={id}
                   type="button"
-                  onClick={() => setVideo({ theme: id })}
+                  onClick={() => setVideo({ themes: { ...v.themes, [outputKey(current)]: id } })}
                   className={`rounded-xl p-1.5 border text-left cursor-pointer transition-colors ${
                     on ? "border-brand-blue bg-brand-blue/10" : "border-white/10 hover:bg-white/5"
                   }`}
@@ -251,7 +273,7 @@ export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: P
                 />
               )}
             </Field>
-            <Field label="Pause between lines">
+            <Field label={project.kind === "story" ? "Pause between sentences" : "Pause between lines"}>
               <Slider
                 value={v.gapBetweenLines}
                 min={0}
@@ -269,6 +291,18 @@ export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: P
               />
               <p className="text-xs text-paper/45 mt-1">{RESOLUTIONS[v.resolution].blurb}</p>
             </Field>
+            {project.kind === "story" && (
+              <Field label="Translation shown">
+                <Segmented
+                  value={v.storyTranslation}
+                  options={[
+                    ["sentence", "The sentence being read"],
+                    ["paragraph", "The whole paragraph"],
+                  ]}
+                  onChange={(value) => setVideo({ storyTranslation: value as VideoSettings["storyTranslation"] })}
+                />
+              </Field>
+            )}
           </div>
 
           <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
@@ -278,14 +312,15 @@ export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: P
             <Toggle checked={v.karaoke} onChange={(on) => setVideo({ karaoke: on })}>
               Highlight words as you speak
             </Toggle>
-            <Toggle checked={v.intro} onChange={(on) => setVideo({ intro: on })}>
-              Title card
-            </Toggle>
-            <Toggle checked={v.outro} onChange={(on) => setVideo({ outro: on })}>
-              Closing card
-            </Toggle>
           </div>
+          {!isLesson && v.plays > 1 && (
+            <p className="text-xs text-paper/45">
+              Tip: {project.kind === "story" ? "stories" : "dialogues"} usually read best with each line played once.
+            </p>
+          )}
         </section>
+
+        <IntroOutroPanel project={project} settings={settings} update={update} />
 
         <section className="card p-5 space-y-4">
           <h2 className="text-lg font-bold">Videos to make</h2>
@@ -293,10 +328,6 @@ export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: P
             {choices.map((langs) => {
               const key = outputKey(langs);
               const on = chosen.has(key);
-              const label =
-                langs.length > 1
-                  ? `${langs.map((id) => findAudienceLanguage(id)?.label ?? id).join(" + ")} together`
-                  : `${findAudienceLanguage(langs[0])?.label ?? langs[0]} video`;
               return (
                 <button
                   key={key}
@@ -307,16 +338,21 @@ export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: P
                   }`}
                 >
                   {on ? "✓ " : ""}
-                  {label}
+                  {langs.length > 1 ? `${languagesLabel(langs)} together` : `${languagesLabel(langs)} video`}
                 </button>
               );
             })}
           </div>
 
           {ffmpeg === false && (
-            <p className="text-sm text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">
-              ffmpeg is not installed, so the MP4 cannot be assembled. Windows: <code>winget install Gyan.FFmpeg</code> ·
-              macOS: <code>brew install ffmpeg</code> — then restart the app.
+            <ErrorNote>
+              ffmpeg is not installed, so the MP4 cannot be assembled. Windows: winget install Gyan.FFmpeg · macOS: brew
+              install ffmpeg — then restart the app.
+            </ErrorNote>
+          )}
+          {missingAudio > 0 && (
+            <p className="text-xs text-kurd-sun">
+              {missingAudio} line{missingAudio === 1 ? " has" : "s have"} no audio loaded yet and will be left out.
             </p>
           )}
 
@@ -343,16 +379,14 @@ export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: P
               type="button"
               className="btn btn-primary w-full py-3 text-base"
               onClick={makeVideos}
-              disabled={!audio || !lines.length || !v.outputs.length || ffmpeg === false}
+              disabled={!lines.length || !v.outputs.length || ffmpeg === false}
             >
               <Clapperboard size={18} />
               Make {v.outputs.length} video{v.outputs.length === 1 ? "" : "s"}
               {totalSeconds ? ` · ${formatTime(totalSeconds, 0)} each` : ""}
             </button>
           )}
-          {error && (
-            <p className="text-sm text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">{error}</p>
-          )}
+          {error && <ErrorNote>{error}</ErrorNote>}
         </section>
 
         {project.renders.length > 0 && (
@@ -365,7 +399,7 @@ export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: P
                   video={video}
                   stale={video.fingerprint !== fingerprint(project, video.languages)}
                   caption={video.languages.map((id) => project.captions[id] || "").filter(Boolean).join("\n\n")}
-                  onDownload={() => downloadBlob(video.blob, fileName(video))}
+                  onDownload={() => downloadBlob(video.blob, videoFileName(project, video.languages))}
                   onDelete={() => update((p) => ({ renders: p.renders.filter((r) => r.id !== video.id) }))}
                 />
               ))}
@@ -381,12 +415,12 @@ export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: P
               <button
                 key={outputKey(langs)}
                 type="button"
-                onClick={() => setPreviewLangs(langs)}
+                onClick={() => setCurrent(langs)}
                 className={`px-2.5 py-1 rounded-lg text-xs font-semibold cursor-pointer ${
-                  outputKey(langs) === outputKey(previewLangs) ? "bg-white/15 text-white" : "text-paper/50 hover:bg-white/5"
+                  outputKey(langs) === outputKey(current) ? "bg-white/15 text-white" : "text-paper/50 hover:bg-white/5"
                 }`}
               >
-                {langs.map((id) => findAudienceLanguage(id)?.label ?? id).join(" + ")}
+                {languagesLabel(langs)}
               </button>
             ))}
           </div>
@@ -394,7 +428,7 @@ export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: P
             <canvas ref={canvasRef} className="w-full h-full block" />
             {!lines.length && (
               <div className="absolute inset-0 flex items-center justify-center text-sm text-paper/50 p-6 text-center">
-                Nothing to show yet — the lesson needs at least one line.
+                Nothing to show yet — the video needs at least one line with audio.
               </div>
             )}
           </div>
@@ -407,156 +441,5 @@ export default function VideoStep({ project, audio, ffmpeg, logoSrc, update }: P
         </div>
       </aside>
     </div>
-  );
-}
-
-function VideoCard({
-  video,
-  stale,
-  caption,
-  onDownload,
-  onDelete,
-}: {
-  video: RenderedVideo;
-  stale: boolean;
-  caption: string;
-  onDownload: () => void;
-  onDelete: () => void;
-}) {
-  const url = useMemo(() => URL.createObjectURL(video.blob), [video.blob]);
-  useEffect(() => () => URL.revokeObjectURL(url), [url]);
-  const [copied, setCopied] = useState(false);
-  const label = video.languages.map((id) => findAudienceLanguage(id)?.label ?? id).join(" + ");
-
-  return (
-    <div className="rounded-xl border border-white/10 bg-black/25 p-3 space-y-2">
-      <div className="flex items-center justify-between">
-        <span className="font-semibold text-sm">{label}</span>
-        <span className="text-xs text-paper/50">
-          {formatTime(video.durationSeconds, 0)} · {formatBytes(video.blob.size)}
-        </span>
-      </div>
-      <video src={url} controls playsInline className="w-full rounded-lg aspect-[9/16] bg-black" />
-      {stale && <p className="text-xs text-kurd-sun">Made before your latest edits — make it again to include them.</p>}
-      <div className="flex gap-2">
-        <button type="button" className="btn btn-primary flex-1" onClick={onDownload}>
-          <Download size={15} /> MP4
-        </button>
-        {caption && (
-          <button
-            type="button"
-            className="btn btn-ghost"
-            title="Copy the post caption"
-            onClick={() => {
-              void navigator.clipboard.writeText(caption);
-              setCopied(true);
-              setTimeout(() => setCopied(false), 1500);
-            }}
-          >
-            {copied ? <Check size={15} /> : <Copy size={15} />}
-          </button>
-        )}
-        <button
-          type="button"
-          className="btn btn-danger"
-          title="Delete this video"
-          onClick={() => window.confirm("Delete this video?") && onDelete()}
-        >
-          <Trash2 size={15} />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="space-y-1.5">
-      <span className="label">{label}</span>
-      {children}
-    </div>
-  );
-}
-
-function Segmented({
-  value,
-  options,
-  onChange,
-}: {
-  value: string;
-  options: [string, string][];
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div className="flex rounded-lg bg-black/30 border border-white/10 p-0.5">
-      {options.map(([id, label]) => (
-        <button
-          key={id}
-          type="button"
-          onClick={() => onChange(id)}
-          className={`flex-1 px-2 py-1.5 rounded-md text-xs font-semibold cursor-pointer transition-colors ${
-            value === id ? "bg-brand-blue/30 text-white" : "text-paper/55 hover:text-white"
-          }`}
-        >
-          {label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function Slider({
-  value,
-  min,
-  max,
-  step,
-  suffix,
-  onChange,
-}: {
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  suffix: string;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <div className="flex items-center gap-3">
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="flex-1 accent-[#33afd5]"
-      />
-      <span className="text-sm font-mono w-12 text-right">
-        {value.toFixed(1)}
-        {suffix}
-      </span>
-    </div>
-  );
-}
-
-function Toggle({
-  checked,
-  onChange,
-  children,
-}: {
-  checked: boolean;
-  onChange: (on: boolean) => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="inline-flex items-center gap-2 cursor-pointer select-none">
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        className="w-4 h-4 accent-[#8bb942]"
-      />
-      <span className="text-paper/85">{children}</span>
-    </label>
   );
 }

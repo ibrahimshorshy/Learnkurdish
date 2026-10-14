@@ -1,92 +1,142 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Settings, Library, Mic2, Plus, Check, X, Loader2 } from "lucide-react";
-import type { Project, StepId } from "./types";
-import { STEPS } from "./types";
+import { Settings, Library, Mic2, Plus, Check, X, Loader2, Film, MessagesSquare, BookOpen } from "lucide-react";
+import type { Project, ProjectKind, StepId } from "./types";
+import { KINDS, stepsFor } from "./types";
 import { createProject, getProject, projectLabel, saveProject } from "./utils/projectStore";
 import { LAST_PROJECT_KEY, loadSettings, saveSettings, type AppSettings } from "./utils/settings";
 import { getHealth, type Health } from "./utils/api";
-import { useRecordingAudio, usePlayback } from "./audio/useRecordingAudio";
+import { useLessonAudio, usePlayback } from "./audio/useRecordingAudio";
 import { transcribeRecording, translateLines } from "./lessonActions";
 import RecordStep from "./components/RecordStep";
+import StorySourceStep from "./components/StorySourceStep";
+import VideoSourceStep from "./components/VideoSourceStep";
 import TranscriptStep from "./components/TranscriptStep";
 import TranslateStep from "./components/TranslateStep";
-import VideoStep from "./components/VideoStep";
+import OutputStep from "./components/OutputStep";
+import SubtitleOutputStep from "./components/SubtitleOutputStep";
 import LibraryTab from "./components/LibraryTab";
 import SettingsPanel from "./components/SettingsPanel";
 
 type Patch = Partial<Project> | ((p: Project) => Partial<Project>);
+type Tab = ProjectKind | "library";
+
+const KIND_ICONS: Record<ProjectKind, React.ReactNode> = {
+  lesson: <Mic2 size={16} />,
+  video: <Film size={16} />,
+  dialogue: <MessagesSquare size={16} />,
+  story: <BookOpen size={16} />,
+};
+
+const lastKey = (kind: ProjectKind) => `${LAST_PROJECT_KEY}:${kind}`;
+const LAST_TAB_KEY = "leen-kurdish-last-tab";
+
+/** Whether a project has anything worth keeping yet. */
+function hasContent(p: Project): boolean {
+  return Boolean(p.recording || p.lines.length || p.sourceVideo || p.storyText?.trim() || p.script?.length);
+}
 
 export default function App() {
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [health, setHealth] = useState<Health | null>(null);
-  const [tab, setTab] = useState<"studio" | "library">("studio");
+  const [tab, setTab] = useState<Tab>(() => {
+    const saved = localStorage.getItem(LAST_TAB_KEY) as Tab | null;
+    return saved && (saved === "library" || KINDS.some((k) => k.id === saved)) ? saved : "lesson";
+  });
   const [showSettings, setShowSettings] = useState(false);
   const [project, setProject] = useState<Project | null>(null);
   const [busy, setBusy] = useState<null | "transcribe" | "translate">(null);
   const [busyLineId, setBusyLineId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const { audio, error: audioError } = useRecordingAudio(project?.recording);
-  const playback = usePlayback(audio);
+  const audio = useLessonAudio(project);
+  const playback = usePlayback();
 
   /* ---------- settings and server status ---------- */
 
   useEffect(() => saveSettings(settings), [settings]);
-
   useEffect(() => {
     void getHealth().then(setHealth);
   }, [showSettings]);
+  useEffect(() => {
+    localStorage.setItem(LAST_TAB_KEY, tab);
+  }, [tab]);
 
-  /* ---------- the open project ---------- */
+  /* ---------- the open project, one per kind ---------- */
+
+  const projectRef = useRef<Project | null>(null);
+  projectRef.current = project;
+
+  const flushSave = useCallback(() => {
+    const p = projectRef.current;
+    if (p && hasContent(p)) void saveProject(p).catch(() => {});
+  }, []);
+
+  /** Opens the last project of `kind`, or a fresh one. */
+  const loadKind = useCallback(async (kind: ProjectKind) => {
+    // 1.0 remembered one project with no kind; it was a lesson.
+    const lastId = localStorage.getItem(lastKey(kind)) ?? (kind === "lesson" ? localStorage.getItem(LAST_PROJECT_KEY) : null);
+    const found = lastId ? await getProject(lastId).catch(() => null) : null;
+    setProject(found && found.kind === kind ? found : createProject(kind, loadSettings().audiences));
+  }, []);
 
   useEffect(() => {
-    const lastId = localStorage.getItem(LAST_PROJECT_KEY);
-    (lastId ? getProject(lastId) : Promise.resolve(null))
-      .catch(() => null)
-      .then((found) => setProject(found ?? createProject(loadSettings().audiences)));
-  }, []);
+    const kind = tab === "library" ? null : tab;
+    if (!kind || projectRef.current?.kind === kind) return;
+    flushSave();
+    playback.stop();
+    setError(null);
+    void loadKind(kind);
+  }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const update = useCallback((patch: Patch) => {
     setProject((p) => (p ? { ...p, ...(typeof patch === "function" ? patch(p) : patch), updatedAt: Date.now() } : p));
   }, []);
 
   // Autosave, a moment after the last change. A project with nothing in it yet
-  // is not saved, so opening the app does not litter the library.
+  // is not saved, so opening a section does not litter the library.
   const saveTimer = useRef<number | null>(null);
   useEffect(() => {
-    if (!project) return;
-    if (!project.recording && !project.lines.length) return;
-    localStorage.setItem(LAST_PROJECT_KEY, project.id);
+    if (!project || !hasContent(project)) return;
+    localStorage.setItem(lastKey(project.kind), project.id);
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
       saveProject(project).catch((err) => setError(`Could not save to this browser: ${err?.message || err}`));
     }, 400);
   }, [project]);
 
-  const newLesson = () => {
+  useEffect(() => {
+    window.addEventListener("beforeunload", flushSave);
+    return () => window.removeEventListener("beforeunload", flushSave);
+  }, [flushSave]);
+
+  const newProject = () => {
+    const kind = tab === "library" ? project?.kind ?? "lesson" : tab;
+    flushSave();
     playback.stop();
-    setProject(createProject(settings.audiences, project?.video));
-    localStorage.removeItem(LAST_PROJECT_KEY);
-    setTab("studio");
+    setProject(createProject(kind, settings.audiences, project?.kind === kind ? project.video : undefined));
+    localStorage.removeItem(lastKey(kind));
+    setTab(kind);
     setError(null);
   };
 
   const openProject = (p: Project) => {
+    flushSave();
     playback.stop();
     setProject(p);
-    localStorage.setItem(LAST_PROJECT_KEY, p.id);
-    setTab("studio");
+    localStorage.setItem(lastKey(p.kind), p.id);
+    setTab(p.kind);
     setError(null);
   };
 
   /* ---------- AI steps ---------- */
 
   const runTranscribe = async () => {
-    if (!project || !audio) return;
+    const source = audio.sources.main ?? audio.raw;
+    if (!project || !source) return;
     setBusy("transcribe");
     setError(null);
     try {
-      update(await transcribeRecording(project, audio, settings));
+      update(await transcribeRecording(project, source, settings));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -135,30 +185,35 @@ export default function App() {
 
   // Never sit on a step whose inputs are gone.
   const step: StepId = project && reachable(project.step) ? project.step : "record";
-  const stepIndex = STEPS.findIndex((s) => s.id === step);
+  const steps = stepsFor(project?.kind ?? "lesson");
+  const stepIndex = steps.findIndex((s) => s.id === step);
   const logoSrc = settings.logoDataUrl || "/logo.png";
+  const showStudio = tab !== "library" && project?.kind === tab;
 
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-40 border-b border-white/10 bg-[#03101f]/85 backdrop-blur-md">
-        <div className="max-w-6xl mx-auto px-4 h-16 flex items-center gap-4">
+        <div className="max-w-6xl mx-auto px-4 h-16 flex items-center gap-3">
           <img src="/logo.svg" alt="Leen" className="h-8 w-auto" />
-          <div className="leading-tight">
+          <div className="leading-tight hidden md:block">
             <div className="font-bold">Kurdish Studio</div>
             <div className="text-[11px] text-paper/55">
               <span className="script">سۆرانی</span> → Arabic · English
             </div>
           </div>
-          <nav className="ml-auto flex items-center gap-1">
-            <TabButton active={tab === "studio"} onClick={() => setTab("studio")}>
-              <Mic2 size={16} /> Studio
-            </TabButton>
-            <TabButton active={tab === "library"} onClick={() => setTab("library")}>
-              <Library size={16} /> Library
+          <nav className="ml-auto flex items-center gap-1 overflow-x-auto">
+            {KINDS.map((k) => (
+              <TabButton key={k.id} active={tab === k.id} onClick={() => setTab(k.id)} title={k.blurb}>
+                {KIND_ICONS[k.id]} <span className="hidden sm:inline">{k.label}</span>
+              </TabButton>
+            ))}
+            <span className="w-px h-6 bg-white/10 mx-1" />
+            <TabButton active={tab === "library"} onClick={() => setTab("library")} title="Every project you made">
+              <Library size={16} /> <span className="hidden sm:inline">Library</span>
             </TabButton>
             <button
               type="button"
-              className="icon-btn !w-10 !h-10 ml-1 relative"
+              className="icon-btn !w-10 !h-10 ml-1 relative shrink-0"
               title="Settings"
               onClick={() => setShowSettings(true)}
             >
@@ -176,10 +231,15 @@ export default function App() {
           <LibraryTab
             currentId={project?.id ?? null}
             onOpen={openProject}
-            onNew={newLesson}
-            onDeletedCurrent={newLesson}
+            onNew={newProject}
+            onDeletedCurrent={() => {
+              if (project) {
+                localStorage.removeItem(lastKey(project.kind));
+                setProject(createProject(project.kind, settings.audiences));
+              }
+            }}
           />
-        ) : !project ? (
+        ) : !showStudio || !project ? (
           <div className="flex justify-center py-20 text-paper/60">
             <Loader2 className="animate-spin" />
           </div>
@@ -191,20 +251,20 @@ export default function App() {
                 placeholder={projectLabel(project)}
                 value={project.name}
                 onChange={(e) => update({ name: e.target.value })}
-                aria-label="Lesson name"
+                aria-label="Project name"
               />
               {project.usage.costUsd > 0 && (
                 <span className="text-xs text-paper/45" title="Estimated from list prices">
                   AI cost so far ≈ ${project.usage.costUsd.toFixed(4)}
                 </span>
               )}
-              <button type="button" className="btn btn-ghost" onClick={newLesson}>
-                <Plus size={15} /> New lesson
+              <button type="button" className="btn btn-ghost" onClick={newProject}>
+                <Plus size={15} /> New {KINDS.find((k) => k.id === project.kind)?.label.toLowerCase()}
               </button>
             </div>
 
             <ol className="grid grid-cols-4 gap-2">
-              {STEPS.map((s, i) => {
+              {steps.map((s, i) => {
                 const active = s.id === step;
                 const done = i < stepIndex;
                 const enabled = reachable(s.id);
@@ -248,22 +308,43 @@ export default function App() {
               </div>
             )}
 
-            {step === "record" && (
-              <RecordStep
-                project={project}
-                settings={settings}
-                audio={audio}
-                audioError={audioError}
-                busy={busy === "transcribe"}
-                update={update}
-                onTranscribe={runTranscribe}
-              />
-            )}
+            {step === "record" &&
+              (project.kind === "video" ? (
+                <VideoSourceStep
+                  project={project}
+                  settings={settings}
+                  audio={audio}
+                  busy={busy === "transcribe"}
+                  update={update}
+                  onTranscribe={runTranscribe}
+                />
+              ) : project.kind === "story" ? (
+                <StorySourceStep
+                  project={project}
+                  settings={settings}
+                  audio={audio.raw}
+                  audioError={audio.error}
+                  busy={busy === "transcribe"}
+                  update={update}
+                  onTranscribe={runTranscribe}
+                />
+              ) : (
+                <RecordStep
+                  project={project}
+                  settings={settings}
+                  audio={audio.raw}
+                  audioError={audio.error}
+                  busy={busy === "transcribe"}
+                  update={update}
+                  onTranscribe={runTranscribe}
+                />
+              ))}
             {step === "transcript" && (
               <TranscriptStep
                 project={project}
                 audio={audio}
                 playback={playback}
+                settings={settings}
                 enabledAudiences={settings.audiences}
                 busy={busy !== null}
                 update={update}
@@ -275,6 +356,7 @@ export default function App() {
                 project={project}
                 audio={audio}
                 playback={playback}
+                settings={settings}
                 busy={busy !== null}
                 busyLineId={busyLineId}
                 update={update}
@@ -286,9 +368,26 @@ export default function App() {
                 }}
               />
             )}
-            {step === "video" && (
-              <VideoStep project={project} audio={audio} ffmpeg={health?.ffmpeg ?? null} logoSrc={logoSrc} update={update} />
-            )}
+            {step === "video" &&
+              (project.kind === "video" ? (
+                <SubtitleOutputStep
+                  project={project}
+                  sources={audio.sources}
+                  settings={settings}
+                  ffmpeg={health?.ffmpeg ?? null}
+                  logoSrc={logoSrc}
+                  update={update}
+                />
+              ) : (
+                <OutputStep
+                  project={project}
+                  sources={audio.sources}
+                  settings={settings}
+                  ffmpeg={health?.ffmpeg ?? null}
+                  logoSrc={logoSrc}
+                  update={update}
+                />
+              ))}
           </>
         )}
       </main>
@@ -303,17 +402,20 @@ export default function App() {
 function TabButton({
   active,
   onClick,
+  title,
   children,
 }: {
   active: boolean;
   onClick: () => void;
+  title?: string;
   children: React.ReactNode;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold cursor-pointer transition-colors ${
+      title={title}
+      className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold cursor-pointer transition-colors shrink-0 ${
         active ? "bg-white/10 text-white" : "text-paper/60 hover:text-white hover:bg-white/5"
       }`}
     >

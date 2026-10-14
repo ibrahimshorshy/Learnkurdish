@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { FolderOpen, Trash2, Mic, Film, Plus, Loader2 } from "lucide-react";
 import type { Project } from "../types";
-import { STEPS } from "../types";
+import { KINDS, stepsFor } from "../types";
 import { deleteProject, formatBytes, listProjects, projectLabel } from "../utils/projectStore";
 import { formatTime } from "../audio/audioTools";
 
@@ -40,14 +40,14 @@ export default function LibraryTab({ currentId, onOpen, onNew, onDeletedCurrent 
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold">Your lessons</h2>
+          <h2 className="text-xl font-bold">Your projects</h2>
           <p className="text-sm text-paper/55">
             Kept on this computer until you delete them — your recordings are not uploaded anywhere except to the AI
             for transcription.
           </p>
         </div>
         <button type="button" className="btn btn-primary" onClick={onNew}>
-          <Plus size={16} /> New lesson
+          <Plus size={16} /> New
         </button>
       </div>
 
@@ -57,13 +57,15 @@ export default function LibraryTab({ currentId, onOpen, onNew, onDeletedCurrent 
         {projects.map((project) => {
           const size =
             (project.recording?.blob.size ?? 0) + project.renders.reduce((sum, r) => sum + r.blob.size, 0);
-          const step = STEPS.find((s) => s.id === project.step);
+          const step = stepsFor(project.kind).find((s) => s.id === project.step);
+          const kind = KINDS.find((k) => k.id === project.kind);
           return (
             <div
               key={project.id}
               className={`card p-4 space-y-3 ${project.id === currentId ? "!border-brand-blue/60" : ""}`}
             >
               <div>
+                <span className="text-[10px] uppercase font-bold tracking-wider text-brand-blue">{kind?.label}</span>
                 <h3 className="font-semibold truncate" title={projectLabel(project)}>
                   {projectLabel(project)}
                 </h3>

@@ -7,8 +7,7 @@
  * it.
  */
 
-import type { Project, VideoSettings } from "../types";
-import { DEFAULT_THEME } from "../render/themes";
+import type { AudioFxSettings, CardSettings, Project, ProjectKind, VideoSettings } from "../types";
 import { DEFAULT_RESOLUTION } from "../render/renderLesson";
 import { DEFAULT_TAUGHT_LANGUAGE } from "../config/languages";
 
@@ -54,42 +53,120 @@ export function newId(prefix = "p"): string {
   return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 }
 
-export function defaultVideoSettings(audiences: string[]): VideoSettings {
+/* ------------------------------------------------------------------ */
+/* Defaults                                                             */
+/* ------------------------------------------------------------------ */
+
+export const DEFAULT_TTS_VOICE = "Charon";
+
+export function defaultCard(enabled = true): CardSettings {
+  return { enabled, audio: "silent", text: {}, clips: {}, voice: DEFAULT_TTS_VOICE };
+}
+
+export function defaultAudioFx(): AudioFxSettings {
+  return { preset: "clean", room: false, tightenPauses: true, maxPause: 0.45 };
+}
+
+/**
+ * Video defaults differ by kind: a lesson plays each line twice with time to
+ * repeat; a dialogue and a story read straight through.
+ */
+export function defaultVideoSettings(audiences: string[], kind: ProjectKind = "lesson"): VideoSettings {
+  const readThrough = kind === "dialogue" || kind === "story";
   return {
-    theme: DEFAULT_THEME,
+    themes: {},
     resolution: DEFAULT_RESOLUTION,
-    plays: 2,
-    repeatGapMode: "auto",
+    plays: readThrough ? 1 : 2,
+    repeatGapMode: readThrough ? "off" : "auto",
     repeatGapSeconds: 2.5,
-    gapBetweenLines: 0.6,
-    showTransliteration: true,
-    karaoke: false,
-    intro: true,
-    outro: true,
+    gapBetweenLines: kind === "dialogue" ? 0.45 : kind === "story" ? 0.35 : 0.6,
+    showTransliteration: kind !== "story",
+    karaoke: kind === "story",
     outputs: audiences.map((id) => [id]),
+    storyTranslation: "sentence",
+    subtitlePosition: "lower",
+    videoFit: "blur",
   };
 }
 
-export function createProject(audiences: string[], video?: Partial<VideoSettings>): Project {
+export function createProject(kind: ProjectKind, audiences: string[], carry?: Partial<VideoSettings>): Project {
   const now = Date.now();
+  const video = defaultVideoSettings(audiences, kind);
+  // Carry the look over from the last project of the same kind, but never its outputs.
+  if (carry) {
+    video.themes = carry.themes ?? video.themes;
+    video.resolution = carry.resolution ?? video.resolution;
+  }
   return {
     id: newId(),
+    kind,
     name: "",
     createdAt: now,
     updatedAt: now,
     taughtLang: DEFAULT_TAUGHT_LANGUAGE,
     audiences,
+    cuts: [],
+    audioFx: kind === "video" ? { ...defaultAudioFx(), tightenPauses: false } : defaultAudioFx(),
+    speakers: [{ name: "" }, { name: "" }],
     context: "",
     note: "",
     lines: [],
     titles: {},
     captions: {},
     step: "record",
-    video: { ...defaultVideoSettings(audiences), ...video, outputs: audiences.map((id) => [id]) },
+    intro: defaultCard(kind !== "video"),
+    outro: defaultCard(kind !== "video"),
+    video,
     renders: [],
     usage: { inputTokens: 0, audioTokens: 0, outputTokens: 0, costUsd: 0 },
   };
 }
+
+/**
+ * Brings a project saved by any earlier version up to the current shape.
+ * Applied to everything read from the store, so the rest of the app can rely
+ * on every field being there.
+ */
+export function normalizeProject(raw: any): Project {
+  const kind: ProjectKind = raw?.kind ?? "lesson";
+  const audiences: string[] = Array.isArray(raw?.audiences) && raw.audiences.length ? raw.audiences : ["ar", "en"];
+  const base = createProject(kind, audiences);
+  const oldVideo = raw?.video ?? {};
+  const video: VideoSettings = { ...base.video, ...oldVideo };
+  if (!video.themes || typeof video.themes !== "object") video.themes = {};
+  // 1.0 had one theme for every output; keep it only if it was changed from the old default.
+  if (oldVideo.theme && oldVideo.theme !== "sun" && !Object.keys(video.themes).length) {
+    for (const output of video.outputs ?? []) video.themes[output.join("+")] = oldVideo.theme;
+  }
+  delete video.theme;
+  const introOn = oldVideo.intro;
+  const outroOn = oldVideo.outro;
+  delete video.intro;
+  delete video.outro;
+
+  return {
+    ...base,
+    ...raw,
+    kind,
+    audiences,
+    cuts: Array.isArray(raw?.cuts) ? raw.cuts : [],
+    audioFx: { ...base.audioFx, ...(raw?.audioFx ?? (raw?.kind ? {} : { preset: "raw" })) },
+    speakers:
+      Array.isArray(raw?.speakers) && raw.speakers.length >= 2 ? raw.speakers : [{ name: "" }, { name: "" }],
+    intro: raw?.intro ?? { ...defaultCard(), enabled: introOn ?? true },
+    outro: raw?.outro ?? { ...defaultCard(), enabled: outroOn ?? true },
+    video,
+    lines: Array.isArray(raw?.lines) ? raw.lines : [],
+    titles: raw?.titles ?? {},
+    captions: raw?.captions ?? {},
+    renders: Array.isArray(raw?.renders) ? raw.renders : [],
+    usage: raw?.usage ?? base.usage,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Storage                                                              */
+/* ------------------------------------------------------------------ */
 
 export async function saveProject(project: Project): Promise<void> {
   await run("readwrite", (store) => store.put({ ...project, updatedAt: Date.now() }));
@@ -97,12 +174,12 @@ export async function saveProject(project: Project): Promise<void> {
 
 export async function getProject(id: string): Promise<Project | null> {
   const found = await run<Project | undefined>("readonly", (store) => store.get(id));
-  return found ?? null;
+  return found ? normalizeProject(found) : null;
 }
 
 export async function listProjects(): Promise<Project[]> {
   const all = await run<Project[]>("readonly", (store) => store.getAll());
-  return all.sort((a, b) => b.updatedAt - a.updatedAt);
+  return all.map(normalizeProject).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 export async function deleteProject(id: string): Promise<void> {
@@ -115,8 +192,12 @@ export function projectLabel(project: Project): string {
     project.name.trim() ||
     project.titles.en?.trim() ||
     project.lines[0]?.kurdish?.slice(0, 40) ||
-    `Untitled lesson · ${new Date(project.createdAt).toLocaleDateString()}`
+    `Untitled ${project.kind} · ${new Date(project.createdAt).toLocaleDateString()}`
   );
+}
+
+export function speakerName(project: Project, index: number): string {
+  return project.speakers[index]?.name?.trim() || `Speaker ${index + 1}`;
 }
 
 export function formatBytes(bytes: number): string {
