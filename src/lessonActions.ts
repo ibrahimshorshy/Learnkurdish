@@ -266,8 +266,13 @@ export function fingerprint(project: Project, languages: string[]): string {
   const card = (c: Project["intro"]) => [
     c.enabled,
     c.audio,
+    c.voice,
     languages.map((id) => c.text[id] || ""),
-    languages.map((id) => (c.clips[id] ? `${c.clips[id].blob.size}:${c.clips[id].durationSeconds}` : "")),
+    languages.map((id) =>
+      c.clips[id]
+        ? `${c.clips[id].blob.size}:${c.clips[id].durationSeconds}:${c.clips[id].madeFrom ?? c.clips[id].source}`
+        : ""
+    ),
   ];
   const material = JSON.stringify({
     kind: project.kind,
