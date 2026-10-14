@@ -8,14 +8,18 @@
  *   cuts     — stretches of the main recording you removed (a cough, a false
  *              start) are skipped
  *   tighten  — silences inside the line longer than the limit are shortened
- *   level    — the recording's levelling gain, a soft limit, and short fades
- *              at every join so nothing clicks
+ *   level    — the recording's levelling gain, a soft limit, a short
+ *              crossfade at every join and a fade at each end, so nothing
+ *              clicks
  *
  * Playback in the editor and the video both go through here, so what you hear
  * while proofing is what the video gets.
  *
  * Video projects never cut or tighten: their audio has to stay in step with
  * the picture.
+ *
+ * Everything above `assemble` is pure (no AudioBuffer), so it runs under the
+ * tests.
  */
 
 import type { LessonLine, Project, TimeRange } from "../types";
@@ -27,6 +31,16 @@ export interface AudioSources {
   /** Re-recorded takes, by take id — cleaned up likewise. */
   takes: Map<string, RecordingAudio>;
 }
+
+/**
+ * Two pieces are joined by overlapping them this long. A fade down and back up
+ * at a join leaves a small hole, which is audible in the middle of a word
+ * (where a cut often lands) and as a flutter in room tone; an equal-power
+ * crossfade leaves neither.
+ */
+export const JOIN_CROSSFADE = 0.012;
+/** Fade at the very start and end of a clip. */
+export const EDGE_FADE = 0.015;
 
 /** [start, end) minus every range in `remove`, in order. */
 export function subtractRanges(start: number, end: number, remove: TimeRange[]): TimeRange[] {
@@ -77,8 +91,9 @@ export function linePieces(line: LessonLine, source: RecordingAudio, project: Pr
   const end = fromTake ? line.take!.end : line.end;
   const editable = project.kind !== "video";
 
-  let pieces =
-    editable && !fromTake ? subtractRanges(start, end, project.cuts) : [{ start, end }];
+  // Cuts are marked on the main recording's timeline, so they mean nothing to a take.
+  let pieces = editable && !fromTake ? subtractRanges(start, end, project.cuts) : [{ start, end }];
+  // A take is tightened by its own pauses: `source` is the take, with its own analysis.
   if (editable && project.audioFx.tightenPauses) {
     const trims = pauseTrims(pieces, source.analysis.segments, project.audioFx.maxPause);
     pieces = pieces.flatMap((p) => subtractRanges(p.start, p.end, trims));
@@ -86,14 +101,110 @@ export function linePieces(line: LessonLine, source: RecordingAudio, project: Pr
   return pieces;
 }
 
+/** How long two pieces overlap where they are joined. */
+function joinOverlap(before: number, after: number): number {
+  return Math.max(0, Math.min(JOIN_CROSSFADE, before / 2, after / 2));
+}
+
+/** How long pieces last once joined with crossfades. */
+export function piecesDuration(pieces: TimeRange[]): number {
+  let total = 0;
+  pieces.forEach((p, i) => {
+    const d = Math.max(0, p.end - p.start);
+    total += d;
+    if (i > 0) total -= joinOverlap(Math.max(0, pieces[i - 1].end - pieces[i - 1].start), d);
+  });
+  return Math.max(0, total);
+}
+
 /** How long the line will be once built, without building it. */
 export function lineDuration(line: LessonLine, sources: AudioSources, project: Project): number {
   const source = line.take ? sources.takes.get(line.take.id) : sources.main;
-  if (!source) return Math.max(0, line.end - line.start);
-  return linePieces(line, source, project).reduce((sum, p) => sum + (p.end - p.start), 0);
+  if (!source) return Math.max(0, line.take ? line.take.end - line.take.start : line.end - line.start);
+  return piecesDuration(linePieces(line, source, project));
 }
 
-/** Joins pieces of a buffer into one clip, levelled, with a fade at every edge. */
+/* ------------------------------------------------------------------ */
+/* Cuts                                                                 */
+/* ------------------------------------------------------------------ */
+
+/** Cuts sorted, with any that overlap or touch merged into one. */
+export function normalizeCuts(cuts: TimeRange[]): TimeRange[] {
+  const sorted = cuts
+    .filter((c) => Number.isFinite(c.start) && Number.isFinite(c.end) && c.end - c.start > 0.005)
+    .map((c) => ({ start: Math.max(0, c.start), end: c.end }))
+    .sort((a, b) => a.start - b.start);
+  const out: TimeRange[] = [];
+  for (const cut of sorted) {
+    const last = out[out.length - 1];
+    // Within 10ms counts as touching: two cuts that close would leave a sliver nobody can hear.
+    if (last && cut.start <= last.end + 0.01) last.end = Math.max(last.end, cut.end);
+    else out.push({ ...cut });
+  }
+  return out.map((c) => ({ start: round3(c.start), end: round3(c.end) }));
+}
+
+/** `cuts` with `range` removed too. */
+export function addCut(cuts: TimeRange[], range: TimeRange): TimeRange[] {
+  const start = Math.min(range.start, range.end);
+  const end = Math.max(range.start, range.end);
+  return normalizeCuts([...cuts, { start, end }]);
+}
+
+/** `cuts` without the one that covers `time`. */
+export function restoreCutAt(cuts: TimeRange[], time: number): TimeRange[] {
+  return cuts.filter((c) => !(time >= c.start && time <= c.end));
+}
+
+/** The cut under `time`, if any. */
+export function cutAt(cuts: TimeRange[], time: number): TimeRange | undefined {
+  return cuts.find((c) => time >= c.start && time <= c.end);
+}
+
+/**
+ * How much the cuts take out: in all, and from the lines that actually use the
+ * main recording (a cut between lines, or under a line with its own take,
+ * removes nothing you would hear).
+ */
+export function cutSummary(project: Pick<Project, "cuts" | "lines" | "kind">): {
+  count: number;
+  total: number;
+  inLines: number;
+} {
+  const cuts = normalizeCuts(project.cuts);
+  const total = cuts.reduce((sum, c) => sum + (c.end - c.start), 0);
+  let inLines = 0;
+  if (project.kind !== "video") {
+    for (const line of project.lines) {
+      if (line.take || line.skip) continue;
+      for (const c of cuts) inLines += Math.max(0, Math.min(line.end, c.end) - Math.max(line.start, c.start));
+    }
+  }
+  return { count: cuts.length, total, inLines };
+}
+
+function round3(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+/* ------------------------------------------------------------------ */
+/* Building the clip                                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Keeps peaks under full scale without squaring them off. Below the knee the
+ * sample is untouched; above it, it bends smoothly towards 1. Continuous, so a
+ * loud word is rounded off rather than crackling.
+ */
+export function softLimit(v: number): number {
+  const knee = 0.8;
+  const a = Math.abs(v);
+  if (a <= knee) return v;
+  const bent = knee + (1 - knee) * Math.tanh((a - knee) / (1 - knee));
+  return v < 0 ? -bent : bent;
+}
+
+/** Joins pieces of a buffer into one clip, levelled, crossfaded at every join, faded at both ends. */
 export function assemble(buffer: AudioBuffer, pieces: TimeRange[], gain = 1): AudioBuffer {
   const rate = buffer.sampleRate;
   const spans = pieces
@@ -102,11 +213,16 @@ export function assemble(buffer: AudioBuffer, pieces: TimeRange[], gain = 1): Au
       to: Math.min(buffer.length, Math.ceil(p.end * rate)),
     }))
     .filter((s) => s.to > s.from);
-  const length = Math.max(1, spans.reduce((sum, s) => sum + (s.to - s.from), 0));
+  const crossfade = Math.floor(JOIN_CROSSFADE * rate);
+  const overlaps = spans.map((s, i) =>
+    i === 0 ? 0 : Math.min(crossfade, Math.floor((spans[i - 1].to - spans[i - 1].from) / 2), Math.floor((s.to - s.from) / 2))
+  );
+  const length = Math.max(
+    1,
+    spans.reduce((sum, s, i) => sum + (s.to - s.from) - overlaps[i], 0)
+  );
   const clip = new AudioBuffer({ length, numberOfChannels: buffer.numberOfChannels, sampleRate: rate });
-
-  const outerFade = Math.floor(0.015 * rate);
-  const joinFade = Math.floor(0.006 * rate);
+  const edge = Math.min(Math.floor(EDGE_FADE * rate), Math.floor(length / 2));
 
   for (let c = 0; c < buffer.numberOfChannels; c++) {
     const src = buffer.getChannelData(c);
@@ -114,17 +230,27 @@ export function assemble(buffer: AudioBuffer, pieces: TimeRange[], gain = 1): Au
     let offset = 0;
     spans.forEach((span, index) => {
       const n = span.to - span.from;
-      const fadeIn = Math.min(index === 0 ? outerFade : joinFade, Math.floor(n / 2));
-      const fadeOut = Math.min(index === spans.length - 1 ? outerFade : joinFade, Math.floor(n / 2));
+      const x = overlaps[index];
+      // Start `x` samples early, over the end of the previous piece.
+      offset -= x;
       for (let i = 0; i < n; i++) {
-        let v = (src[span.from + i] || 0) * gain;
-        if (v > 0.95 || v < -0.95) v = Math.tanh(v);
-        if (fadeIn > 0 && i < fadeIn) v *= i / fadeIn;
-        else if (fadeOut > 0 && i > n - 1 - fadeOut) v *= (n - 1 - i) / fadeOut;
-        dst[offset + i] = v;
+        const v = src[span.from + i] || 0;
+        if (i < x) {
+          // Equal power: the two pieces are unrelated sound, so their energies add.
+          const phase = ((i + 0.5) / x) * (Math.PI / 2);
+          dst[offset + i] = dst[offset + i] * Math.cos(phase) + v * Math.sin(phase);
+        } else {
+          dst[offset + i] = v;
+        }
       }
       offset += n;
     });
+    for (let i = 0; i < length; i++) {
+      let v = softLimit(dst[i] * gain);
+      if (edge > 0 && i < edge) v *= i / edge;
+      else if (edge > 0 && i > length - 1 - edge) v *= (length - 1 - i) / edge;
+      dst[i] = v;
+    }
   }
   return clip;
 }

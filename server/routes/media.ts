@@ -140,6 +140,9 @@ export async function probeMedia(file: string): Promise<MediaInfo> {
 interface WorkRequest extends Request {
   workDir?: string;
   child?: ChildProcess;
+  /** The browser hung up before the response was sent. */
+  clientGone?: boolean;
+  job?: RenderJob;
 }
 
 /**
@@ -152,6 +155,7 @@ function withWorkDir(req: WorkRequest, res: Response, next: NextFunction) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "leen-media-"));
   req.workDir = dir;
   res.on("close", () => {
+    if (!res.writableFinished) req.clientGone = true;
     const remove = () => fs.rm(dir, { recursive: true, force: true }, () => {});
     const child = req.child;
     if (child && child.exitCode === null && child.signalCode === null) {
@@ -190,7 +194,7 @@ async function requireFfmpeg(_req: Request, res: Response, next: NextFunction) {
 /* ------------------------------------------------------------------ */
 
 interface RenderJob {
-  stage: "preparing" | "encoding" | "done" | "failed";
+  stage: "uploading" | "preparing" | "encoding" | "done" | "failed";
   fraction: number;
   child?: ChildProcess;
   cancelled?: boolean;
@@ -285,7 +289,7 @@ export function frameFilter(
   const bh = even(H / 12);
   return [
     `[0:v]split=2[bgin][fgin]`,
-    `[bgin]scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},boxblur=6:2,lutyuv=y=val*0.55,scale=${W}:${H},setsar=1[bg]`,
+    `[bgin]scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},boxblur=6:2,lutyuv=y=val*0.5,scale=${W}:${H},setsar=1[bg]`,
     `[fgin]scale=${W}:${H}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[fg]`,
     `[bg][fg]overlay=(W-w)/2:(H-h)/2[base]`,
   ].join(";");
@@ -422,6 +426,12 @@ export function registerMediaRoutes(app: Express) {
     "/api/render/subtitled",
     requireFfmpeg,
     withWorkDir,
+    // Registered before the upload, so a cancel that arrives mid-upload counts.
+    (req: WorkRequest, _res: Response, next: NextFunction) => {
+      req.job = { stage: "uploading", fraction: 0, touchedAt: Date.now() };
+      jobs.set(jobId(req) || `s${Date.now().toString(36)}`, req.job);
+      next();
+    },
     upload.fields([
       { name: "video", maxCount: 1 },
       { name: "cue", maxCount: 10000 },
@@ -429,16 +439,16 @@ export function registerMediaRoutes(app: Express) {
       { name: "audio", maxCount: 1 },
     ]),
     async (req: WorkRequest, res: Response): Promise<any> => {
-      const id = jobId(req) || `s${Date.now().toString(36)}`;
-      const job: RenderJob = { stage: "preparing", fraction: 0, touchedAt: Date.now() };
-      jobs.set(id, job);
+      const job = req.job!;
+      job.stage = "preparing";
       const fail = (status: number, error: string) => {
         job.stage = "failed";
         // The browser may already have gone (cancelled); nobody to tell.
-        if (res.destroyed || req.destroyed) return;
+        if (req.clientGone) return;
         return res.status(status).json({ error });
       };
 
+      if (job.cancelled) return fail(499, "The render was cancelled.");
       const files = (req.files ?? {}) as Record<string, Express.Multer.File[]>;
       const video = files.video?.[0];
       if (!video) return fail(400, "No video was uploaded.");
@@ -550,7 +560,7 @@ export function registerMediaRoutes(app: Express) {
           job.touchedAt = Date.now();
         });
       } catch (err: any) {
-        if (job.cancelled || res.destroyed || req.destroyed) return fail(499, "The render was cancelled.");
+        if (job.cancelled || req.clientGone) return fail(499, "The render was cancelled.");
         console.error("Subtitled render failed:", err?.message || err);
         return fail(500, "ffmpeg could not make the subtitled video. " + String(err?.message || "").split("\n").slice(-3).join(" "));
       } finally {
