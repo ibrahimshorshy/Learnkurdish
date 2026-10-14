@@ -268,14 +268,26 @@ export function useLessonAudio(project: Project | null, update?: Update): Lesson
     }
   }, []);
 
+  /**
+   * Works through the queue, one file at a time, re-reading it after each file
+   * so a change made meanwhile is picked up in the same pass.
+   */
+  const drainRef = useRef<() => Promise<void>>(async () => {});
+  const againRef = useRef(false);
   const drain = useCallback(async () => {
-    if (runningRef.current) return;
+    if (runningRef.current) {
+      // Asked again mid-pass: run one more pass afterwards, in case the change
+      // came just as this one was finishing.
+      againRef.current = true;
+      return;
+    }
     runningRef.current = true;
     // Everything tried in this pass, so nothing is tried twice while React catches up.
     const tried: Record<string, true> = {};
     try {
       for (;;) {
-        const queue = pendingJobs(projectRef.current, { ...failedRef.current, ...tried }, Boolean(updateRef.current));
+        const canStore = Boolean(updateRef.current);
+        const queue = pendingJobs(projectRef.current, { ...failedRef.current, ...tried }, canStore);
         const job = queue[0];
         if (!job) break;
         tried[job.id] = true;
@@ -283,34 +295,42 @@ export function useLessonAudio(project: Project | null, update?: Update): Lesson
         const ready = recallProcessed(job.source, job.key);
         if (ready) {
           store(job, ready);
-          continue;
+        } else {
+          setRunning({ state: "processing", label: job.label, remaining: queue.length });
+          const controller = new AbortController();
+          currentRef.current = { id: job.id, controller };
+          try {
+            const audio = await loadRecordingAudio(job.source);
+            const blob = await requestProcessed(audio, job.fx, controller.signal);
+            rememberProcessed(job.source, job.key, blob);
+            setMadeVersion((v) => v + 1);
+            store(job, blob);
+          } catch (err) {
+            if ((err as Error)?.name !== "AbortError") {
+              const message = err instanceof Error ? err.message : String(err);
+              // No ffmpeg, or no server: every other file would fail the same way.
+              const fatal = err instanceof ProcessingError && err.fatal;
+              const ids = fatal ? queue.map((j) => j.id) : [job.id];
+              setFailed((f) => ({ ...f, ...Object.fromEntries(ids.map((id) => [id, message])) }));
+              if (fatal) break;
+            }
+          } finally {
+            currentRef.current = null;
+          }
         }
-
-        setRunning({ state: "processing", label: job.label, remaining: queue.length });
-        const controller = new AbortController();
-        currentRef.current = { id: job.id, controller };
-        try {
-          const audio = await loadRecordingAudio(job.source);
-          const blob = await requestProcessed(audio, job.fx, controller.signal);
-          rememberProcessed(job.source, job.key, blob);
-          setMadeVersion((v) => v + 1);
-          store(job, blob);
-        } catch (err) {
-          if ((err as Error)?.name === "AbortError") continue;
-          const message = err instanceof Error ? err.message : String(err);
-          setFailed((f) => ({ ...f, [job.id]: message }));
-          if (err instanceof ProcessingError && err.fatal) break;
-        } finally {
-          currentRef.current = null;
-        }
-        // Let React render the stored result before the queue is read again.
+        // Let React render what was just stored before the queue is read again.
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
     } finally {
       runningRef.current = false;
       setRunning(null);
+      if (againRef.current) {
+        againRef.current = false;
+        window.setTimeout(() => void drainRef.current(), 0);
+      }
     }
   }, [store]);
+  drainRef.current = drain;
 
   // Settings changed while a file was being cleaned for the old ones: drop it.
   useEffect(() => {
@@ -324,14 +344,6 @@ export function useLessonAudio(project: Project | null, update?: Update): Lesson
     const timer = window.setTimeout(() => void drain(), 700);
     return () => window.clearTimeout(timer);
   }, [signature, drain]);
-
-  // A pass that ends while work is still pending (settings changed mid-pass) needs another.
-  useEffect(() => {
-    if (running === null && signature && !runningRef.current) {
-      const timer = window.setTimeout(() => void drain(), 700);
-      return () => window.clearTimeout(timer);
-    }
-  }, [running]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const retryProcessing = useCallback(() => setFailed({}), []);
 
