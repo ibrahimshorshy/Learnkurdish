@@ -1,0 +1,38 @@
+{
+  "name": "leen-kurdish-studio",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Turn your own Kurdish Sorani voice recordings into vertical lesson videos for Arabic and English speakers: AI transcription line by line, AI translation, a review pass, then MP4.",
+  "scripts": {
+    "go": "node setup.mjs",
+    "dev": "tsx server.ts",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "start": "node dist/server.cjs",
+    "lint": "tsc --noEmit",
+    "test": "tsx tests/segmentation.test.mjs && tsx tests/languages.test.mjs && tsx tests/timeline.test.mjs && tsx tests/transcriptParse.test.mjs"
+  },
+  "dependencies": {
+    "@google/genai": "^2.4.0",
+    "@tailwindcss/vite": "^4.1.14",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "lucide-react": "^0.546.0",
+    "multer": "^2.2.0",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/multer": "^2.2.0",
+    "@types/node": "^22.14.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.0.4",
+    "esbuild": "^0.25.0",
+    "tailwindcss": "^4.1.14",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.3"
+  }
+}

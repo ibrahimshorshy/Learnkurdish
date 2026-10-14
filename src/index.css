@@ -1,0 +1,175 @@
+@import "tailwindcss";
+
+/*
+ * UniSIRWAN Dubai ships with the app (public/fonts) so Sorani's own letters —
+ * ڕ ڵ ۆ ێ ە — render correctly offline and are guaranteed to be loaded before
+ * the first video frame is drawn. The four files disagree about their family
+ * names, so they are declared under one family and told apart by weight.
+ */
+@font-face {
+  font-family: "UniSIRWAN Dubai";
+  src: url("/fonts/UniSIRWANDubai-Light.ttf") format("truetype");
+  font-weight: 300;
+  font-display: block;
+}
+@font-face {
+  font-family: "UniSIRWAN Dubai";
+  src: url("/fonts/UniSIRWANDubai-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-display: block;
+}
+@font-face {
+  font-family: "UniSIRWAN Dubai";
+  src: url("/fonts/UniSIRWANDubai-Medium.ttf") format("truetype");
+  font-weight: 500 600;
+  font-display: block;
+}
+@font-face {
+  font-family: "UniSIRWAN Dubai";
+  src: url("/fonts/UniSIRWANDubai-Bold.ttf") format("truetype");
+  font-weight: 700 900;
+  font-display: block;
+}
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-kurdish: "UniSIRWAN Dubai", "Noto Naskh Arabic", sans-serif;
+  --color-ink: #041730;
+  --color-ink-soft: #0a2444;
+  --color-panel: #072039;
+  --color-brand-blue: #33afd5;
+  --color-brand-green: #8bb942;
+  --color-paper: #d7e1f2;
+  --color-kurd-red: #e0313a;
+  --color-kurd-sun: #fdc82f;
+}
+
+html,
+body {
+  background-color: #03101f;
+  color: #ffffff;
+  font-family: var(--font-sans);
+}
+
+.card {
+  background: rgba(7, 32, 57, 0.62);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1rem;
+}
+
+/* Any field holding Arabic-script text reads better a size up and in the brand face. */
+.script {
+  font-family: var(--font-kurdish);
+  font-size: 1.05em;
+  line-height: 1.7;
+}
+
+.field {
+  width: 100%;
+  background: rgba(3, 16, 31, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.6rem;
+  padding: 0.5rem 0.75rem;
+  color: #fff;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.field:focus {
+  border-color: #33afd5;
+}
+.field::placeholder {
+  color: rgba(215, 225, 242, 0.35);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  border-radius: 0.65rem;
+  padding: 0.5rem 0.9rem;
+  font-weight: 600;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s, border-color 0.15s;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background: linear-gradient(90deg, #33afd5, #217c6c 60%, #8bb942);
+  color: #fff;
+}
+.btn-primary:not(:disabled):hover {
+  filter: brightness(1.1);
+}
+.btn-ghost {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #d7e1f2;
+}
+.btn-ghost:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.09);
+}
+.btn-danger {
+  background: rgba(224, 49, 58, 0.12);
+  border-color: rgba(224, 49, 58, 0.35);
+  color: #ffb3b7;
+}
+.btn-danger:not(:disabled):hover {
+  background: rgba(224, 49, 58, 0.22);
+}
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.5rem;
+  color: rgba(215, 225, 242, 0.75);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.icon-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(215, 225, 242, 0.5);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #03101f;
+}
+::-webkit-scrollbar-thumb {
+  background: #14375c;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #33afd5;
+}
+
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgba(224, 49, 58, 0.55); }
+  100% { box-shadow: 0 0 0 22px rgba(224, 49, 58, 0); }
+}
+.recording-pulse {
+  animation: pulse-ring 1.4s ease-out infinite;
+}
