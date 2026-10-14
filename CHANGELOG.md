@@ -1,5 +1,50 @@
 # Changelog
 
+## 2.0.0
+
+### Four kinds of project
+
+- **Lesson** — as before: record sentences, get a listen-and-repeat video.
+- **Video** — upload a video of yourself; get it back with the Kurdish, its
+  pronunciation and the translation burned in as subtitles, fitted to 9:16.
+- **Dialogue** — a two-speaker recording; mark which lines belong to speaker 1
+  or 2, name them, and get a chat-thread video.
+- **Story** — paste or upload a longer text, read it aloud, and get a reading
+  video paragraph by paragraph. The known text is aligned to your reading
+  rather than transcribed from scratch.
+
+Each kind has its own tab and remembers its own open project. Lessons from
+1.0 open as they were.
+
+### Your voice
+
+- **Re-record a single line**: a fresh take replaces only that line's audio.
+- **Audio clean-up presets** (noise removal and tone) and an optional touch of
+  room ambience, none of which moves the timing.
+- **Cut** stretches of a recording and **shorten long pauses** inside lines.
+  Both are non-destructive.
+- Playing a line in the editor plays exactly what the video will get.
+
+### Title and closing cards
+
+AI-written and AI-voiced in Arabic or English, your own recorded or uploaded
+clip, or silent — and written or voiced again on demand.
+
+### Look
+
+- Backgrounds are chosen per video: **Emerald** (dark green) is the default
+  for Arabic, **Amethyst** (dark purple) for English, and **Twilight** (green
+  into purple) when both share a video.
+- In a two-language video, each language's "listen / your turn" cue has its
+  own line, so Arabic and English no longer scramble each other.
+
+### Under the hood
+
+- The server is split into modules, one route file per feature.
+- The renderer is split into a shared frame kit, one renderer per kind,
+  title/closing cards as a wrapper around any of them, and shared preview and
+  export.
+
 ## 1.0.0
 
 First version.
