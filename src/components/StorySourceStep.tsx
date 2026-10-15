@@ -54,6 +54,7 @@ import {
 } from "../utils/storyText";
 import { ErrorNote } from "./ui";
 import { freshRecordingPatch } from "../utils/projectStore";
+import { RECORDING_BEING_READ, holdLeave } from "../utils/leaveGuard";
 
 export type StorySourceStepProps = RecordStepProps;
 
@@ -150,6 +151,12 @@ export default function StorySourceStep({ project, settings, audio, audioError, 
   const recording = project.recording;
   const url = useObjectUrl(recording?.blob);
   const live = recorder.state !== "idle";
+  // A reading being checked has not reached the project yet, and a story with
+  // no text typed has never been saved: leaving now would lose it.
+  useEffect(() => (saving ? holdLeave(RECORDING_BEING_READ) : undefined), [saving]);
+  // A new reading while the last one is being transcribed would get that
+  // transcription's sentences and times; the record step blocks it the same way.
+  const blocked = saving || (busy && !live);
 
   /** Stores a new recording after checking it decodes — the same reset as the lesson's record step. */
   const accept = async (blob: Blob, fileName?: string) => {
@@ -249,7 +256,7 @@ export default function StorySourceStep({ project, settings, audio, audioError, 
 
   const model = findTextModel(settings.transcribeModel);
   const tooShort = Boolean(recording && hasText && recording.durationSeconds < stats.readingSeconds * 0.45);
-  const recorderProps = { recorder, live, saving, onStart: startRecording, onStop: stopRecording };
+  const recorderProps = { recorder, live, saving, blocked, onStart: startRecording, onStop: stopRecording };
 
   return (
     <div className="space-y-5">
@@ -365,7 +372,7 @@ export default function StorySourceStep({ project, settings, audio, audioError, 
                 className="hidden"
                 onChange={onAudioFile}
               />
-              <button type="button" className="btn btn-ghost w-full" onClick={() => audioFileRef.current?.click()} disabled={saving}>
+              <button type="button" className="btn btn-ghost w-full" onClick={() => audioFileRef.current?.click()} disabled={blocked}>
                 <Upload size={15} /> Upload a recording
               </button>
             </>
@@ -560,6 +567,7 @@ function RecorderControls({
   recorder,
   live,
   saving,
+  blocked,
   onStart,
   onStop,
   compact = false,
@@ -567,6 +575,8 @@ function RecorderControls({
   recorder: ReturnType<typeof useRecorder>;
   live: boolean;
   saving: boolean;
+  /** No new reading can start (one is being checked, or the last is being transcribed). */
+  blocked: boolean;
   onStart: () => void;
   onStop: () => void;
   compact?: boolean;
@@ -575,7 +585,7 @@ function RecorderControls({
     <button
       type="button"
       onClick={live ? onStop : onStart}
-      disabled={saving}
+      disabled={blocked}
       className={`relative shrink-0 rounded-full flex items-center justify-center transition-all cursor-pointer ${
         compact ? "w-14 h-14" : "w-24 h-24"
       } ${live ? "bg-kurd-red recording-pulse" : "bg-gradient-to-br from-brand-blue to-brand-green hover:scale-105"}`}

@@ -2,8 +2,9 @@
  * Uploads: what each one is saved as, how big it may be, and which formats
  * ffmpeg may read it as.
  *
- * The server listens on the local network, so an upload is not always the
- * app's own. Two things keep a crafted one harmless:
+ * An upload is not always the app's own: with HOST set the server is open to
+ * the local network, and the request guard (server/security.ts) is one fence,
+ * not the only one. Two things keep a crafted upload harmless:
  *
  * - The browser's file name never chooses the extension. ffmpeg picks some
  *   formats by extension alone — a playlist named x.m3u8 is read as HLS and
@@ -30,9 +31,10 @@ export const GB = 1024 * MB;
 /**
  * Phone and camera videos: MP4/MOV/M4V/3GP (one demuxer), MKV/WebM, AVI,
  * and the older camera and PC formats the app also takes when dropped on it
- * (a camcorder's .mts, .mpg, .wmv, .flv). None of these reads other files.
+ * (a camcorder's .mts, .mpg, .wmv, .flv, and Ogg/Theora .ogv, which the
+ * browser also reports as video/*). None of these reads other files.
  */
-export const VIDEO_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,mpeg,asf,flv";
+export const VIDEO_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,mpeg,asf,flv,ogg";
 /** The browser's WAV encoder output. */
 export const WAV_FORMATS = "wav";
 /** A single PNG, whichever of the two image readers ffmpeg picks for it. */

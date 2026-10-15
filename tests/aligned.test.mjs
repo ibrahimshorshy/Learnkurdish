@@ -190,4 +190,24 @@ check("starts that cross a little: the text's order is kept", crossed.lines.map(
 check("starts that cross a little: paragraph 2 still starts on sentence 2", crossed.lines[1].paragraphStart === true && !crossed.lines[2].paragraphStart);
 check("starts that cross a little: times still trusted", crossed.timesTrusted);
 
+// The checker's case: sentence 3 crosses sentence 2's start and sits wholly
+// inside it. Its times are not usable, so the app places the lines from the
+// audio instead of keeping a 0.05 s sliver.
+const inside = serverRun(
+  {
+    sentences: [
+      { n: 1, heard: true, start: 1, end: 3 },
+      { n: 2, heard: true, start: 5.3, end: 8 },
+      { n: 3, heard: true, start: 5.0, end: 6 },
+    ],
+  },
+  ["¶ یەک.", "¶ دوو.", "سێ."],
+  10
+);
+check("a sentence timed inside the one before: times not trusted", !inside.timesTrusted, JSON.stringify(inside.lines));
+check(
+  "a sentence timed inside the one before: order and paragraph starts kept",
+  inside.lines.map((l) => l.text).join() === "یەک.,دوو.,سێ." && inside.lines[1].paragraphStart === true && !inside.lines[2].paragraphStart
+);
+
 done("aligned transcription");

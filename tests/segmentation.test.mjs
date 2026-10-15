@@ -4,7 +4,7 @@
  * word gaps inside) separated by sentence pauses.
  */
 import { analyzeSpeech } from "../src/render/audioAlign.ts";
-import { snapLinesToPauses, placeLinesByLength, pausesOf, finish, LEFT_OUT_MARGIN } from "../src/audio/segmentation.ts";
+import { snapLinesToPauses, placeLinesByLength, pausesOf, finish, LEFT_OUT_MARGIN, LEFT_OUT_PAUSE } from "../src/audio/segmentation.ts";
 import { check, near, done } from "./harness.mjs";
 
 const RATE = 16000;
@@ -152,11 +152,35 @@ check("a false start stays out of the next line", stumble[1].start >= 26 && stum
 check("a false start stays out of the line before", stumble[0].end <= 25, JSON.stringify(stumble));
 
 // A restart close to the sentence it restarts: only a short pause in between.
+// That looks just like a first word set off by a comma, so it is kept (the
+// result from before speech could be left out).
 const restart = snapLinesToPauses(
   [{ start: 1, end: 3 }, { start: 5.5, end: 8 }],
   runsAt([[1, 3], [3.9, 5.05], [5.5, 8]], 9)
 );
-check("a restart just before its sentence still stays out", restart[1].start >= 5.05 && restart[0].end <= 3.9, JSON.stringify(restart));
+check(
+  "a restart with only a short pause before its sentence is kept",
+  same(restart, [
+    { start: 0.88, end: 3.2 },
+    { start: 3.78, end: 8.2 },
+  ]),
+  JSON.stringify(restart)
+);
+
+// A remark left out, and B's first word inside the gap, set off from the rest
+// of B by a comma: the remark goes, the word stays with B.
+const remarkLate = snapLinesToPauses(
+  [{ start: 1, end: 2.7 }, { start: 7.2, end: 9 }],
+  runsAt([[1, 2.7], [3.8, 4.8], [6.0, 6.3], [6.7, 9]], 10)
+);
+check("a remark left out, the next line's first word kept", remarkLate[0].end <= 3.8 && remarkLate[1].start >= 4.8 && remarkLate[1].start <= 6.0, JSON.stringify(remarkLate));
+
+// A remark left out, and the model ended A before its last word.
+const remarkEarly = snapLinesToPauses(
+  [{ start: 1, end: 2.0 }, { start: 6.5, end: 8 }],
+  runsAt([[1, 2], [2.4, 2.7], [4, 5], [6.5, 8]], 9)
+);
+check("a remark left out, the line's last word kept", remarkEarly[0].end >= 2.7 && remarkEarly[0].end <= 4 && remarkEarly[1].start >= 5, JSON.stringify(remarkEarly));
 
 // Three lines: one boundary with speech left out, one without.
 const mixed = snapLinesToPauses(
@@ -197,7 +221,50 @@ check(
     { start: 6.88, end: 9.2 },
   ])
 );
-check("the margin is a quarter second", LEFT_OUT_MARGIN === 0.25);
+check("left out only when well clear of the model's edges", LEFT_OUT_MARGIN >= 0.5 && LEFT_OUT_PAUSE >= 0.5);
+
+// Model edges a little out, around a word set off from its sentence by a
+// comma: the word must stay in its line's clip. (These dropped a word when
+// any whole run in the gap counted as left out.)
+const keeps = (lines, spans, duration, expected, label) => {
+  const got = snapLinesToPauses(lines, runsAt(spans, duration));
+  check(label, same(got, expected), JSON.stringify(got));
+};
+keeps(
+  [{ start: 1, end: 2.5 }, { start: 4.4, end: 6 }],
+  [[1, 2.5], [3.7, 4.1], [4.5, 6]],
+  7,
+  [{ start: 0.88, end: 2.7 }, { start: 3.58, end: 6.2 }],
+  "a late start keeps the line's first word"
+);
+keeps(
+  [{ start: 1, end: 2.5 }, { start: 4.3, end: 6 }],
+  [[1, 2.5], [3.7, 4.0], [4.5, 6]],
+  7,
+  [{ start: 0.88, end: 2.7 }, { start: 3.58, end: 6.2 }],
+  "a late start keeps a short first word"
+);
+keeps(
+  [{ start: 1, end: 2.0 }, { start: 4, end: 6 }],
+  [[1, 2], [2.4, 2.7], [4, 6]],
+  7,
+  [{ start: 0.88, end: 2.9 }, { start: 3.88, end: 6.2 }],
+  "an early end keeps the line's last word"
+);
+// Every model time 0.8 s late, and each line after the first starts with a
+// short word and a comma pause.
+keeps(
+  [[1.0, 2.8], [4.0, 6.3], [7.5, 9.8], [11.0, 13.3]].map(([start, end]) => ({ start: start + 0.8, end: end + 0.8 })),
+  [[1.0, 2.8], [4.0, 4.35], [4.7, 6.3], [7.5, 7.85], [8.2, 9.8], [11.0, 11.35], [11.7, 13.3]],
+  15,
+  [
+    { start: 0.88, end: 3 },
+    { start: 3.88, end: 6.5 },
+    { start: 7.38, end: 10 },
+    { start: 10.88, end: 13.5 },
+  ],
+  "times drifting late keep every line's first word"
+);
 
 // The same through real (synthesized) audio: a sentence, a stumble, the next sentence.
 const withStumble = synth([
@@ -205,7 +272,7 @@ const withStumble = synth([
   { speech: [0.3, 0.35, 0.3] },
   { pause: 0.9 },
   { speech: [0.3, 0.2] }, // a false start
-  { pause: 0.6 },
+  { pause: 0.8 },
   { speech: [0.35, 0.3, 0.4] },
   { pause: 0.7 },
 ]);

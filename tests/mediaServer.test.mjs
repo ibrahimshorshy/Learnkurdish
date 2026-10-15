@@ -126,7 +126,7 @@ check("a playlist extension is dropped", videoExtension("x.m3u8") === "" && vide
 check("ffmpeg is told which containers to accept", only(VIDEO_FORMATS)[0] === "-format_whitelist" && /matroska/.test(VIDEO_FORMATS));
 {
   const allowed = VIDEO_FORMATS.split(",");
-  check("phone and camera containers are allowed", ["mov", "mp4", "3gp", "matroska", "webm", "avi", "mpegts"].every((f) => allowed.includes(f)), VIDEO_FORMATS);
+  check("phone and camera containers are allowed", ["mov", "mp4", "3gp", "matroska", "webm", "avi", "mpegts", "ogg"].every((f) => allowed.includes(f)), VIDEO_FORMATS);
   check("formats that read other files are not", ["hls", "applehttp", "concat", "dash", "image2", "tee", "data"].every((f) => !allowed.includes(f)), VIDEO_FORMATS);
 }
 check("too large is a 413", uploadProblem(new multer.MulterError("LIMIT_FILE_SIZE", "cue"))?.status === 413);

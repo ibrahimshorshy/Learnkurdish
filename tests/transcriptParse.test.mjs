@@ -112,6 +112,83 @@ const swallowed = normalizeTranscript(
 check("keepOrder: a line left with no time of its own makes the times untrusted", !swallowed.timesTrusted);
 check("keepOrder: untrusted lines stay in text order", swallowed.lines.map((l) => l.text).join() === "a,b,c");
 
+// A crossing line the model put wholly inside the line before: once moved up,
+// all of its time is the previous line's, so it has none of its own.
+const contained = normalizeTranscript(
+  [
+    { text: "a", start: 1, end: 3, paragraphStart: true },
+    { text: "b", start: 5.3, end: 8, paragraphStart: true },
+    { text: "c", start: 5.0, end: 6 },
+  ],
+  10,
+  { keepOrder: true }
+);
+check("keepOrder: a crossing line inside the one before makes the times untrusted", !contained.timesTrusted, JSON.stringify(contained.lines));
+check(
+  "keepOrder: untrusted, the text order and paragraph starts are kept",
+  contained.lines.map((l) => l.text).join() === "a,b,c" && contained.lines[1].paragraphStart === true && !contained.lines[2].paragraphStart
+);
+const barelyPast = normalizeTranscript(
+  [
+    { text: "a", start: 1, end: 3 },
+    { text: "b", start: 5.3, end: 8 },
+    { text: "c", start: 5.0, end: 8.1 },
+  ],
+  10,
+  { keepOrder: true }
+);
+check("keepOrder: a crossing line ending just after the one before is untrusted", !barelyPast.timesTrusted, JSON.stringify(barelyPast.lines));
+const wellPast = normalizeTranscript(
+  [
+    { text: "a", start: 1, end: 3 },
+    { text: "b", start: 5.3, end: 6 },
+    { text: "c", start: 5.0, end: 6.5 },
+  ],
+  10,
+  { keepOrder: true }
+);
+// Starts in order, but the line ends inside the one before: the text says it
+// comes after, so the times contradict it.
+const nested = normalizeTranscript(
+  [
+    { text: "a", start: 1, end: 3 },
+    { text: "b", start: 5.0, end: 8 },
+    { text: "c", start: 5.3, end: 6 },
+  ],
+  10,
+  { keepOrder: true }
+);
+check("keepOrder: a line ending inside the one before makes the times untrusted", !nested.timesTrusted, JSON.stringify(nested.lines));
+check(
+  "lines mode is unchanged for a line ending inside the one before",
+  normalizeTranscript(
+    [
+      { text: "a", start: 1, end: 3 },
+      { text: "b", start: 5.0, end: 8 },
+      { text: "c", start: 5.3, end: 6 },
+    ],
+    10
+  ).timesTrusted
+);
+const tailOverlap = normalizeTranscript(
+  [
+    { text: "a", start: 1, end: 3 },
+    { text: "b", start: 2.8, end: 5 },
+  ],
+  10,
+  { keepOrder: true }
+);
+check(
+  "keepOrder: an ordinary overlap at the edge is still shared out",
+  tailOverlap.timesTrusted && near(tailOverlap.lines[0].end, 2.9, 1e-9) && near(tailOverlap.lines[1].start, 2.9, 1e-9),
+  JSON.stringify(tailOverlap.lines)
+);
+check(
+  "keepOrder: a crossing line with time of its own after the one before is kept",
+  wellPast.timesTrusted && wellPast.lines.every((l, i) => l.end - l.start >= 0.15 && (i === 0 || l.start >= wellPast.lines[i - 1].end - 1e-9)),
+  JSON.stringify(wellPast.lines)
+);
+
 const creeping = normalizeTranscript(
   [
     { text: "a", start: 10, end: 11 },

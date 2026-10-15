@@ -66,6 +66,15 @@ run(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "1", "-c:a", "pcm_
 // A file outside the temp folder, and a playlist that points at it.
 run(["-f", "lavfi", "-i", "testsrc2=s=160x120:d=2", "-f", "lavfi", "-i", "sine=d=2", "-c:v", "mpeg2video", "-c:a", "mp2", "-f", "mpegts", path.join(outside, "private.ts")]);
 fs.writeFileSync(file("x.m3u8"), `#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:2.0,\n${path.join(outside, "private.ts")}\n#EXT-X-ENDLIST\n`);
+// An Ogg/Theora video (.ogv), which a browser drop reports as video/ogg. Only
+// when this ffmpeg can write one.
+let ogv = false;
+try {
+  run(["-f", "lavfi", "-i", "testsrc2=s=160x120:r=25:d=2", "-f", "lavfi", "-i", "sine=d=2", "-c:v", "libtheora", "-c:a", "libvorbis", file("clip.ogv")]);
+  ogv = true;
+} catch {
+  console.log("SKIP  this ffmpeg cannot write Theora, so the .ogv check is skipped");
+}
 
 /** Where the first loud sample is, playing the sound straight through as a player that ignores timestamp holes would. */
 function beepAt(input, isWav = false) {
@@ -122,6 +131,11 @@ try {
 
     const playlist = await post("/api/media/extract-audio", [["video", await blob("x.m3u8"), "x.m3u8"]]);
     check("a playlist posing as a video is refused", playlist.res.status === 400 && playlist.body.length < 500, `${playlist.res.status} ${playlist.body.length} bytes`);
+
+    if (ogv) {
+      const ogg = await post("/api/media/extract-audio", [["video", await blob("clip.ogv", "video/ogg"), "clip.ogv"]]);
+      check("an Ogg/Theora video is read", ogg.res.status === 200 && near(Number(ogg.res.headers.get("x-media-duration")), 2, 0.1), `${ogg.res.status} ${ogg.body.subarray(0, 200)}`);
+    }
   }
 
   /* subtitled render */

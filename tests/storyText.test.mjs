@@ -171,6 +171,32 @@ check(
   matchLinesToScript(["a. b. c. d."], toScript("a. b. c. d.")).strayLines === 0
 );
 
+// No limit on how many: five questions merged into one line (the checker's
+// case), a dozen sentences, a sentence split over five lines.
+const questions = "چی؟ بۆچی؟ کەی؟ کێ؟ لە کوێ؟\nئازاد هات.";
+check(
+  "five sentences in one line still match",
+  same(matchLinesToScript(["چی؟ بۆچی؟ کەی؟ کێ؟ لە کوێ؟", "ئازاد هات."], toScript(questions)), { strayLines: 0, missingSentences: 0 })
+);
+const dozen = Array.from({ length: 12 }, (_, i) => `ڕستەی ${"یەک دوو سێ چوار پێنج شەش حەوت هەشت نۆ دە یازدە دوازدە".split(" ")[i]}.`);
+check("twelve sentences in one line still match", same(matchLinesToScript([dozen.join(" ")], toScript(dozen.join(" "))), { strayLines: 0, missingSentences: 0 }));
+check(
+  "a sentence split over five lines still matches",
+  same(matchLinesToScript(["ڕۆژێک", "لە ڕۆژان", "کوڕێک", "لە گوندێک", "هەبوو."], ["¶ ڕۆژێک لە ڕۆژان کوڕێک لە گوندێک هەبوو."]), {
+    strayLines: 0,
+    missingSentences: 0,
+  })
+);
+check(
+  "a long merge with a changed word is still stray",
+  same(matchLinesToScript(["چی؟ بۆچی؟ کەی؟ کێ؟ لە کوێ نا؟", "ئازاد هات."], toScript(questions)), { strayLines: 1, missingSentences: 5 })
+);
+const fiveMerged = [{ kurdish: "چی؟ بۆچی؟ کەی؟ کێ؟ لە کوێ؟", paragraphStart: true }, { kurdish: "ئازاد هات." }];
+check(
+  "lines to text: a five-sentence line matches after the copy",
+  same(matchLinesToScript(fiveMerged.map((l) => l.kurdish), toScript(linesToStoryText(fiveMerged))), { strayLines: 0, missingSentences: 0 })
+);
+
 // "Use the sentences as the text": lines → text → script must match the lines.
 const merged = [{ kurdish: "یەک. دوو.", paragraphStart: true }, { kurdish: "سێ." }, { kurdish: "چوار.", paragraphStart: true }];
 const copied = linesToStoryText(merged);

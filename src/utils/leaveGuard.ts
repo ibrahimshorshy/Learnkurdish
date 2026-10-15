@@ -32,5 +32,11 @@ export function confirmLeave(): boolean {
 }
 
 export const RECORDING_IN_PROGRESS = "A recording is in progress — leaving now throws it away.";
+/**
+ * After Done or an upload, the take is checked before it is stored. A project
+ * that has nothing else in it yet has never been saved, so a take that lands
+ * after it was left has nowhere to go.
+ */
+export const RECORDING_BEING_READ = "Your recording is still being read — leaving now may throw it away.";
 export const RENDER_IN_PROGRESS = "A video is being made — leaving now cancels it.";
 export const UPLOAD_IN_PROGRESS = "Your video is still being read — leaving now cancels it.";

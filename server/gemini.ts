@@ -37,6 +37,26 @@ export function isCredentialProblem(err: unknown): boolean {
   );
 }
 
+/**
+ * The key typed into the app, if it is one. Only a short string is passed on:
+ * anything else would fail inside the SDK with an unhelpful error.
+ */
+export function userKeyOf(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const key = value.trim();
+  return key && key.length <= 200 ? key : undefined;
+}
+
+/**
+ * A model id as the app sends it ("gemini-3.8-flash", or with "models/" in
+ * front). It becomes part of the request URL, so nothing with slashes or odd
+ * characters gets through; anything else means `fallback`.
+ */
+export function modelIdOf(value: unknown, fallback: string): string {
+  const id = String(value ?? "").trim();
+  return /^(models\/)?[A-Za-z0-9][\w.-]{0,79}$/.test(id) ? id : fallback;
+}
+
 export interface FallbackResult<T> {
   response: T;
   model: string;

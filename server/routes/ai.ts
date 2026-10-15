@@ -16,9 +16,17 @@ import {
 import { translatePrompt, translateSystemPrompt } from "../../src/config/prompts";
 import { transcribeMode, type TranscribeInput } from "../../src/config/transcribeModes";
 import { normalizeTranscript } from "../../src/utils/transcript";
-import { audioPart, parseJson, runWithFallback, usageOf } from "../gemini";
+import { audioPart, modelIdOf, parseJson, runWithFallback, usageOf, userKeyOf } from "../gemini";
 
-const audioUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } });
+/**
+ * The recording plus a few form fields. A story's text rides along as one JSON
+ * field (knownLines), so the field limit is set for a long book chapter rather
+ * than multer's 1 MB default.
+ */
+const audioUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 200 * 1024 * 1024, files: 1, fields: 20, fieldSize: 8 * 1024 * 1024 },
+});
 
 /** A JSON array field from a multipart form, tolerating junk. */
 function jsonList(value: unknown, limit: number): string[] {
@@ -46,10 +54,10 @@ export function registerAiRoutes(app: Express) {
         speakers: jsonList(req.body?.speakers, 2),
       };
       const mode = transcribeMode(String(req.body?.mode || "lines"));
-      const preferredModel = String(req.body?.model || DEFAULT_TRANSCRIBE_MODEL);
+      const preferredModel = modelIdOf(req.body?.model, DEFAULT_TRANSCRIBE_MODEL);
       const mimeType = file.mimetype && file.mimetype !== "application/octet-stream" ? file.mimetype : "audio/wav";
 
-      const result = await runWithFallback(req.body?.userApiKey, preferredModel, TRANSCRIBE_FALLBACK_CHAIN, async (client, model) =>
+      const result = await runWithFallback(userKeyOf(req.body?.userApiKey), preferredModel, TRANSCRIBE_FALLBACK_CHAIN, async (client, model) =>
         client.models.generateContent({
           model,
           contents: [{ role: "user", parts: [await audioPart(client, file.buffer, mimeType), { text: mode.prompt(input) }] }],
@@ -100,7 +108,7 @@ export function registerAiRoutes(app: Express) {
       const surrounding: string[] = Array.isArray(req.body?.surrounding)
         ? req.body.surrounding.map((s: unknown) => String(s ?? "")).slice(0, 60)
         : [];
-      const preferredModel = String(req.body?.model || DEFAULT_TRANSLATE_MODEL);
+      const preferredModel = modelIdOf(req.body?.model, DEFAULT_TRANSLATE_MODEL);
       const kind = String(req.body?.kind || "lesson");
 
       const languageProps: Record<string, any> = {};
@@ -142,7 +150,7 @@ export function registerAiRoutes(app: Express) {
         // Later passes see the earlier lines so terms stay consistent.
         const priorContext = first ? surrounding : [...surrounding, ...lines.slice(Math.max(0, offset - 12), offset)];
 
-        const result = await runWithFallback(req.body?.userApiKey, preferredModel, TRANSLATE_FALLBACK_CHAIN, (client, model) =>
+        const result = await runWithFallback(userKeyOf(req.body?.userApiKey), preferredModel, TRANSLATE_FALLBACK_CHAIN, (client, model) =>
           client.models.generateContent({
             model,
             contents: translatePrompt({

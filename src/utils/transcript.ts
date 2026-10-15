@@ -94,15 +94,16 @@ export interface NormalizeOptions {
   /**
    * Keep the lines in the order given rather than sorting them by time. A
    * start a little before the previous line's (within the tolerance the times
-   * are trusted to anyway) is moved up to it; one that leaves a line with
-   * almost no time of its own means the times are not usable.
+   * are trusted to anyway) is moved up to it. A line left with almost no time
+   * the line before does not already cover (one timed wholly inside it) means
+   * the times are not usable.
    */
   keepOrder?: boolean;
 }
 
 /** How far a start may run before the previous line's and the times still be trusted. */
 const ORDER_TOLERANCE = 0.5;
-/** keepOrder: a line moved up to its neighbour must keep at least this much time of its own. */
+/** keepOrder: a line moved up to its neighbour must keep at least this much time past the end of it. */
 const MIN_OWN_TIME = 0.15;
 
 /** Collapses whitespace only: the text is known and kept as written. */
@@ -188,9 +189,16 @@ export function normalizeTranscript(
     // the overlap pass below shares out the time. Sorting instead would put
     // a later sentence before an earlier one, and a paragraph start with it.
     for (let i = 1; i < lines.length; i++) {
-      if (lines[i].start >= lines[i - 1].start) continue;
-      lines[i].start = lines[i - 1].start;
-      if (lines[i].end - lines[i].start < MIN_OWN_TIME) return untrusted();
+      const prev = lines[i - 1];
+      const cur = lines[i];
+      const crossed = cur.start < prev.start;
+      if (crossed) cur.start = prev.start;
+      // A line's own time is what the line before does not already cover. One
+      // the model put wholly inside the line before has none, which the text
+      // order rules out, and the overlap pass could only leave it a sliver
+      // that still overlaps. A line moved up needs a little more than none.
+      const own = cur.end - Math.max(cur.start, prev.end);
+      if (crossed ? own < MIN_OWN_TIME : own <= 0) return untrusted();
     }
   } else {
     lines.sort((a, b) => a.start - b.start);

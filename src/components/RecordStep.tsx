@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Mic, Pause, Play, Square, Upload, Wand2, RotateCcw, Loader2, Info } from "lucide-react";
 import type { Project } from "../types";
 import type { AppSettings } from "../utils/settings";
@@ -8,6 +8,7 @@ import { decodeAudio, formatTime } from "../audio/audioTools";
 import { findTextModel } from "../config/models";
 import { useObjectUrl } from "../utils/useObjectUrl";
 import { freshRecordingPatch } from "../utils/projectStore";
+import { RECORDING_BEING_READ, holdLeave } from "../utils/leaveGuard";
 
 export interface RecordStepProps {
   project: Project;
@@ -58,6 +59,11 @@ export default function RecordStep({ project, settings, audio, audioError, busy,
   const url = useObjectUrl(recording?.blob);
 
   const hasWork = project.lines.length > 0;
+
+  // The recorder stops guarding the take when Done is clicked, but it is only
+  // stored once it has been read: leaving before then would lose it, so the
+  // app keeps asking until it is in.
+  useEffect(() => (saving ? holdLeave(RECORDING_BEING_READ) : undefined), [saving]);
 
   /** Stores a new recording, after checking it decodes. */
   const accept = async (blob: Blob, fileName?: string) => {

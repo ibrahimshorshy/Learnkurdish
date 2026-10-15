@@ -317,17 +317,15 @@ export interface TextMatch {
   missingSentences: number;
 }
 
-/** Most sentences one line may hold, or lines one sentence may be split into, and still match. */
-const MAX_JOINED = 4;
-
 /**
  * How a project's lines line up with its script: the lines should be the
  * script's sentences, in order, minus any the reader skipped.
  *
  * Lines merged or split on the transcript step still match: a line that is two
  * or more sentences in a row, or a sentence spread over two or more lines in a
- * row, pairs up as a whole. Their words are all in the text, and a text built
- * from such lines (one line per text line) splits back into the same words.
+ * row, pairs up as a whole, however many there are. Their words are all in the
+ * text, and a text built from such lines (one line per text line) splits back
+ * into the same words.
  */
 export function matchLinesToScript(lineTexts: string[], script: string[] | undefined): TextMatch {
   const sentences = (script ?? []).map((l) => sentenceKey(stripMarker(l).text)).filter(Boolean);
@@ -335,32 +333,8 @@ export function matchLinesToScript(lineTexts: string[], script: string[] | undef
   const n = lines.length;
   const m = sentences.length;
 
-  // Every run of up to MAX_JOINED keys ending at each position, run together
-  // and numbered, so the pairing below compares numbers, not strings.
-  // runs[end * K + k - 1]: the k keys just before `end`; -1 where there are fewer.
-  const K = MAX_JOINED;
-  const ids = new Map<string, number>();
-  const runsOf = (keys: string[]) => {
-    const runs = new Int32Array((keys.length + 1) * K).fill(-1);
-    for (let end = 1; end <= keys.length; end++) {
-      let joined = "";
-      for (let k = 1; k <= Math.min(K, end); k++) {
-        joined = keys[end - k] + joined;
-        let id = ids.get(joined);
-        if (id === undefined) {
-          id = ids.size;
-          ids.set(joined, id);
-        }
-        runs[end * K + k - 1] = id;
-      }
-    }
-    return runs;
-  };
-  const lineRuns = runsOf(lines);
-  const sentenceRuns = runsOf(sentences);
-
   // An ordered pairing, like a longest common subsequence, except that one
-  // line may pair with up to MAX_JOINED sentences in a row and the other way
+  // line may pair with any number of sentences in a row and the other way
   // round. score: lines and sentences paired; paired: of which lines.
   const width = m + 1;
   const score = new Int32Array((n + 1) * width);
@@ -376,21 +350,36 @@ export function matchLinesToScript(lineTexts: string[], script: string[] | undef
       bestLines = p;
     }
   };
+  /**
+   * How many keys in a row, read back from keys[last], run together into
+   * exactly `whole`; 0 if they do not. Each step checks that the run so far
+   * is still the end of `whole`, so a mismatch stops it at once.
+   */
+  const joinedCount = (whole: string, keys: string[], last: number): number => {
+    let length = 0;
+    for (let k = 1; k <= last + 1; k++) {
+      const key = keys[last + 1 - k];
+      length += key.length;
+      if (length > whole.length || !whole.startsWith(key, whole.length - length)) return 0;
+      if (length === whole.length) return k;
+    }
+    return 0;
+  };
   for (let i = 1; i <= n; i++) {
-    const line = lineRuns[i * K];
+    const line = lines[i - 1];
     for (let j = 1; j <= m; j++) {
-      const sentence = sentenceRuns[j * K];
+      const sentence = sentences[j - 1];
       best = -1;
       bestLines = 0;
       take((i - 1) * width + j, 0, 0); // the line is stray
       take(i * width + j - 1, 0, 0); // the sentence is missing
       // One line, one or more sentences in a row.
-      for (let k = 1; k <= Math.min(K, j); k++) {
-        if (sentenceRuns[j * K + k - 1] === line) take((i - 1) * width + j - k, 1, k);
-      }
+      const merged = joinedCount(line, sentences, j - 1);
+      if (merged) take((i - 1) * width + j - merged, 1, merged);
       // One sentence over two or more lines in a row.
-      for (let k = 2; k <= Math.min(K, i); k++) {
-        if (lineRuns[i * K + k - 1] === sentence) take((i - k) * width + j - 1, k, 1);
+      if (line.length < sentence.length) {
+        const split = joinedCount(sentence, lines, i - 1);
+        if (split) take((i - split) * width + j - 1, split, 1);
       }
       score[i * width + j] = best;
       paired[i * width + j] = bestLines;

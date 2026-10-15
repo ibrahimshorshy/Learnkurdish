@@ -23,7 +23,7 @@ import {
 } from "../../src/config/prompts/cards";
 import { VOICE_FALLBACK_CHAIN, safeVoiceModel, safeVoiceName } from "../../src/config/voices";
 import { buildTtsRequest } from "../../src/config/ttsRequest";
-import { errorText, isCredentialProblem, parseJson, runWithFallback, usageOf, type FallbackResult } from "../gemini";
+import { errorText, isCredentialProblem, modelIdOf, parseJson, runWithFallback, usageOf, userKeyOf, type FallbackResult } from "../gemini";
 import { abortOnClose } from "../ffmpeg";
 
 /** Longest card text the voice is asked to read. A card is a sentence, not a paragraph. */
@@ -46,25 +46,8 @@ function isRateLimited(err: unknown): boolean {
   );
 }
 
-/**
- * The key typed into the app, if it is one. Only a short string is passed on:
- * anything else would fail inside the SDK with an unhelpful error.
- */
-function userKeyOf(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const key = value.trim();
-  return key && key.length <= 200 ? key : undefined;
-}
-
-/**
- * A text model id as the app sends it ("gemini-3.8-flash", or with "models/"
- * in front). It becomes part of the request URL, so nothing with slashes or
- * odd characters gets through; anything else means the default.
- */
-function textModelOf(value: unknown): string {
-  const id = String(value ?? "").trim();
-  return /^(models\/)?[A-Za-z0-9][\w.-]{0,79}$/.test(id) ? id : DEFAULT_TRANSLATE_MODEL;
-}
+/** A text model id from the app, or the default. */
+const textModelOf = (value: unknown) => modelIdOf(value, DEFAULT_TRANSLATE_MODEL);
 
 /** Waits `ms`, or less if the request goes away meanwhile. */
 function pause(ms: number, signal: AbortSignal): Promise<void> {
