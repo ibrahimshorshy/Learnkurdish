@@ -144,12 +144,25 @@ function grain(ctx: CanvasRenderingContext2D, opacity: number): CanvasPattern | 
   return grainPattern;
 }
 
-/** Soft blobs are baked once into sprites; a fresh radial gradient per frame is expensive. */
+/**
+ * Soft blobs are baked once into sprites; a fresh radial gradient per frame is
+ * expensive. The cache holds a handful at most (two output sizes' worth), so
+ * switching resolution cannot pile up full-size canvases.
+ */
 const sprites = new Map<string, HTMLCanvasElement>();
+const MAX_SPRITES = 8;
+/** The strongest a gradient theme's glow gets; quieter frames draw its sprite fainter. */
+const GLOW_PEAK = 0.34;
 function blobSprite(color: string, size: number, alpha: number): HTMLCanvasElement {
   const key = `${color}|${size}|${alpha}`;
   const hit = sprites.get(key);
-  if (hit) return hit;
+  if (hit) {
+    // Most recently used last, so the oldest is dropped first.
+    sprites.delete(key);
+    sprites.set(key, hit);
+    return hit;
+  }
+  while (sprites.size >= MAX_SPRITES) sprites.delete(sprites.keys().next().value as string);
   const sprite = document.createElement("canvas");
   sprite.width = size;
   sprite.height = size;
@@ -272,10 +285,16 @@ function gradientTheme(
     },
     paintDynamic(ctx, w, h, s, elapsed, voice) {
       const size = Math.round(520 * s);
-      const sprite = blobSprite(c.glow, size, 0.22 + voice * 0.12);
+      // One sprite at full strength, faded by the voice: a sprite per voice
+      // level would bake (and keep) a new canvas on almost every frame.
+      const sprite = blobSprite(c.glow, size, GLOW_PEAK);
       const x = w / 2 + Math.sin(elapsed * 0.45) * 90 * s - size / 2;
       const y = h * 0.3 + Math.cos(elapsed * 0.35) * 60 * s - size / 2;
+      const level = Math.min(1, Math.max(0, voice));
+      ctx.save();
+      ctx.globalAlpha = (0.22 + level * 0.12) / GLOW_PEAK;
       ctx.drawImage(sprite, x, y);
+      ctx.restore();
     },
   };
 }
