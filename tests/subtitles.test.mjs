@@ -1,5 +1,5 @@
 import { cueTimings, cueIndexAt, subtitleTint, JOIN_GAP, HOLD_AFTER, MIN_ON_SCREEN } from "../src/render/subtitles.ts";
-import { tidyCues, concatList, frameFilter } from "../server/routes/media.ts";
+import { tidyCues, concatList, frameFilter, subtitleGraph, CUE_TAIL_SECONDS } from "../server/routes/media.ts";
 import { check, near, done } from "./harness.mjs";
 
 const line = (id, start, end, extra = {}) => ({
@@ -116,6 +116,25 @@ check(
   check("concat list adds up to past the video's end", durations.reduce((a, b) => a + b, 0) >= 10, list);
   check("concat list holds each cue for its span", list.includes("file 'a.png'\noption framerate 1000\nduration 2.000"), list);
   check("concat list names the last file twice", /file 'blank.png'\noption framerate 1000\n$/.test(list));
+  const tail = durations[durations.length - 1];
+  check("the closing blank outlasts the video by far", tail >= 10 - 5 + CUE_TAIL_SECONDS - 0.001, String(tail));
+  const unknown = concatList(tidyCues([{ file: "a.png", start: 1, end: 2 }], 0), "blank.png", 2);
+  const total = [...unknown.matchAll(/duration ([\d.]+)/g)].reduce((sum, m) => sum + Number(m[1]), 0);
+  check("…even when the video's length is unknown", total >= 2 + CUE_TAIL_SECONDS - 0.001, String(total));
+}
+
+{
+  const base = { fit: "blur", source: { width: 1920, height: 1080 }, width: 1080, height: 1920 };
+  const full = subtitleGraph({ ...base, cues: { x: 0, y: 1400 }, overlay: { x: 440, y: 150 } });
+  check("subtitles are laid over the framed video", full.includes("[base][1:v]overlay=0:1400"), full);
+  check("the subtitle overlay ends with the video", /\[1:v\]overlay=[^;]*shortest=1/.test(full), full);
+  check("the logo is the next input, over the subtitles", full.includes("[subs][2:v]overlay=440:150"), full);
+  check("the logo overlay does not end the video", !/\[2:v\]overlay=[^;]*shortest/.test(full), full);
+  check("the graph ends in [vout] as yuv420p", full.endsWith("format=yuv420p[vout]"), full);
+  const logoOnly = subtitleGraph({ ...base, cues: null, overlay: { x: 2, y: 4 } });
+  check("with no cues the logo is input 1", logoOnly.includes("[base][1:v]overlay=2:4") && !logoOnly.includes("[subs]"), logoOnly);
+  const bare = subtitleGraph({ ...base, cues: null, overlay: null });
+  check("with neither, just the frame", bare.endsWith("[base]format=yuv420p[vout]"), bare);
 }
 
 check("crop fills the frame", frameFilter("crop", { width: 1920, height: 1080 }, 1080, 1920).includes("force_original_aspect_ratio=increase,crop=1080:1920"));

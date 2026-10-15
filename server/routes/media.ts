@@ -242,6 +242,14 @@ export function tidyCues(cues: CueSpec[], duration: number): CueSpec[] {
 }
 
 /**
+ * How far the closing blank runs past the last cue: a day. The subtitle
+ * overlay stops with the video (shortest=1, see subtitleGraph), so the cue
+ * stream must outlast any video, including one whose length ffprobe could not
+ * read. It costs nothing — the blank is still a single image.
+ */
+export const CUE_TAIL_SECONDS = 24 * 60 * 60;
+
+/**
  * The concat list that holds each cue on screen for its span and a blank in
  * between. Durations are written to the millisecond, and each image is read at
  * 1000 "fps" so its timestamp keeps that precision — at the image default of
@@ -260,9 +268,9 @@ export function concatList(cues: CueSpec[], blank: string, total: number): strin
     add(cue.file, cue.end - cue.start);
     cursor = cue.end;
   }
-  // Run the blank past the end so the overlay never runs out early; the
-  // concat demuxer also needs the last file named twice to honour its duration.
-  add(blank, Math.max(1, total - cursor + 1));
+  // The blank runs on long past the end (see CUE_TAIL_SECONDS); the concat
+  // demuxer also needs the last file named twice to honour its duration.
+  add(blank, Math.max(0, total - cursor) + CUE_TAIL_SECONDS);
   lines.push(`file '${blank}'`, "option framerate 1000");
   return lines.join("\n") + "\n";
 }
@@ -293,6 +301,47 @@ export function frameFilter(
     `[fgin]scale=${W}:${H}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[fg]`,
     `[bg][fg]overlay=(W-w)/2:(H-h)/2[base]`,
   ].join(";");
+}
+
+/**
+ * The whole picture: the framed source, then the subtitle stream (input 1)
+ * and the logo (the next input), each placed at its pixel position. The
+ * result is labelled [vout].
+ *
+ * shortest=1 on the subtitle overlay is what keeps the video its own length.
+ * Without it, once the source's last frame has gone through, overlay goes on
+ * making frames — the last picture again — each time the cue stream delivers
+ * an image, so the blank that follows the final cue becomes one extra frame.
+ * When the source's first frame is a few milliseconds after zero (common in
+ * WebM and phone files), that extra frame survives -t and replaces the real
+ * last frame, without its subtitle. The logo overlay must NOT have it: its
+ * input is a single still that ends at once, and would end the video with it.
+ */
+export function subtitleGraph(options: {
+  fit: "blur" | "crop";
+  source: { width: number; height: number };
+  width: number;
+  height: number;
+  /** Where the cue band goes, or null with no cues. */
+  cues: { x: number; y: number } | null;
+  /** Where the logo goes, or null with none. */
+  overlay: { x: number; y: number } | null;
+}): string {
+  const graph = [frameFilter(options.fit, options.source, options.width, options.height)];
+  let last = "base";
+  let input = 1;
+  if (options.cues) {
+    graph.push(`[${last}][${input}:v]overlay=${options.cues.x}:${options.cues.y}:eof_action=repeat:shortest=1[subs]`);
+    last = "subs";
+    input++;
+  }
+  if (options.overlay) {
+    // A single still: overlay repeats its one frame for the whole video.
+    graph.push(`[${last}][${input}:v]overlay=${options.overlay.x}:${options.overlay.y}:eof_action=repeat[logo]`);
+    last = "logo";
+  }
+  graph.push(`[${last}]format=yuv420p[vout]`);
+  return graph.join(";");
 }
 
 function intParam(value: unknown, fallback: number): number {
@@ -484,9 +533,8 @@ export function registerMediaRoutes(app: Express) {
 
       const dir = req.workDir!;
       const inputs: string[] = ["-i", video.path];
-      const graph: string[] = [frameFilter(fit, info, W, H)];
-      let last = "base";
-      let nextInput = 1;
+      let cuePlace: { x: number; y: number } | null = null;
+      let logoPlace: { x: number; y: number } | null = null;
 
       if (cues.length) {
         // A transparent image the size of the cue images, for the gaps; the
@@ -502,31 +550,23 @@ export function registerMediaRoutes(app: Express) {
         fs.writeFileSync(listPath, concatList(cues, blank, duration || cues[cues.length - 1].end));
         // -safe 0 only so the list may use `option`; every name in it is ours.
         inputs.push("-f", "concat", "-safe", "0", "-i", listPath);
-        const x = even(intParam(req.body?.cueX, 0));
-        const y = even(intParam(req.body?.cueY, 0));
-        graph.push(`[${last}][${nextInput}:v]overlay=${x}:${y}:eof_action=repeat[subs]`);
-        last = "subs";
-        nextInput++;
+        cuePlace = { x: even(intParam(req.body?.cueX, 0)), y: even(intParam(req.body?.cueY, 0)) };
       }
 
       const overlay = files.overlay?.[0];
       if (overlay) {
         inputs.push("-i", overlay.path);
-        const x = even(intParam(req.body?.overlayX, 0));
-        const y = even(intParam(req.body?.overlayY, 0));
-        // A single still: overlay repeats its one frame for the whole video.
-        graph.push(`[${last}][${nextInput}:v]overlay=${x}:${y}:eof_action=repeat[logo]`);
-        last = "logo";
-        nextInput++;
+        logoPlace = { x: even(intParam(req.body?.overlayX, 0)), y: even(intParam(req.body?.overlayY, 0)) };
       }
-      graph.push(`[${last}]format=yuv420p[vout]`);
+      const graph = subtitleGraph({ fit, source: info, width: W, height: H, cues: cuePlace, overlay: logoPlace });
 
       const audio = files.audio?.[0];
       let audioMap: string[];
       if (audio) {
+        // Inputs so far: the video, then the cue stream and the logo when present.
+        const index = 1 + (cuePlace ? 1 : 0) + (logoPlace ? 1 : 0);
+        audioMap = ["-map", `${index}:a:0`];
         inputs.push("-i", audio.path);
-        audioMap = ["-map", `${nextInput}:a:0`];
-        nextInput++;
       } else {
         // Optional: a video without sound still renders.
         audioMap = info.hasAudio ? ["-map", "0:a:0"] : [];
@@ -535,7 +575,7 @@ export function registerMediaRoutes(app: Express) {
       const output = path.join(dir, "subtitled.mp4");
       const args = [
         ...inputs,
-        "-filter_complex", graph.join(";"),
+        "-filter_complex", graph,
         "-map", "[vout]",
         ...audioMap,
         "-c:v", "libx264",
