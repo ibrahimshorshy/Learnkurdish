@@ -17,6 +17,8 @@ import { RESOLUTIONS, type ResolutionId } from "../render/renderLesson";
 import { cueIndexAt, cuePng, overlayPng, prepareSubtitles, type PreparedSubtitles } from "../render/subtitles";
 import { loadRecordingAudio } from "../audio/useRecordingAudio";
 import { encodeWavMono, formatTime } from "../audio/audioTools";
+import { softLimit } from "../audio/clipBuilder";
+import { mainKey, recallProcessed } from "../audio/processing";
 import { fingerprint, outputKey } from "../lessonActions";
 import { newId } from "../utils/projectStore";
 import { downloadBlob } from "../utils/download";
@@ -37,20 +39,32 @@ export interface SubtitleOutputStepProps {
 const PREVIEW_WIDTH = 540;
 
 /**
+ * The cleaned-up file that matches the project's current sound settings, or
+ * undefined. One made with an earlier preset is still stored until the new
+ * one lands, and must not be burned in under the new preset's name.
+ */
+function currentCleanup(project: Project): Blob | undefined {
+  const key = mainKey(project);
+  if (!key || !project.recording) return undefined;
+  if (project.processed?.key === key) return project.processed.blob;
+  // Made this session but not (yet) stored in the project: the same file the
+  // lines are playing from, so it is just as good.
+  return recallProcessed(project.recording.blob, key);
+}
+
+/**
  * The cleaned-up sound for the MP4, or null to keep the video's own.
  *
- * Levelled with the same gain the line playback uses, so the video sounds
- * like what you heard while proofing. The camera's own track is kept when the
- * preset is "raw", or when nothing has been cleaned up yet.
+ * Levelled with the same gain and soft limit the line playback uses, so the
+ * video sounds like what you heard while proofing. The camera's own track is
+ * kept when the preset is "raw", or when the clean-up is not ready yet.
  */
 async function cleanedSound(project: Project): Promise<Blob | null> {
-  if (project.audioFx.preset === "raw" || !project.processed) return null;
-  const audio = await loadRecordingAudio(project.processed.blob);
+  const cleaned = currentCleanup(project);
+  if (!cleaned) return null;
+  const audio = await loadRecordingAudio(cleaned);
   const out = new Float32Array(audio.mono.length);
-  for (let i = 0; i < out.length; i++) {
-    const v = audio.mono[i] * audio.gain;
-    out[i] = v > 0.95 || v < -0.95 ? Math.tanh(v) : v;
-  }
+  for (let i = 0; i < out.length; i++) out[i] = softLimit(audio.mono[i] * audio.gain);
   return encodeWavMono(out, audio.buffer.sampleRate);
 }
 
@@ -176,7 +190,7 @@ export default function SubtitleOutputStep({ project, ffmpeg, logoSrc, update }:
   useEffect(() => () => abortRef.current?.abort(), []);
 
   const outputs = v.outputs.filter((o) => o.every((id) => project.audiences.includes(id)));
-  const usingCleanSound = project.audioFx.preset !== "raw" && Boolean(project.processed);
+  const usingCleanSound = Boolean(currentCleanup(project));
 
   const makeVideos = async () => {
     if (!source || !outputs.length) return;
