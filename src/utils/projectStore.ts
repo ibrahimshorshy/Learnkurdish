@@ -7,7 +7,7 @@
  * it.
  */
 
-import type { AudioFxSettings, CardSettings, Project, ProjectKind, VideoSettings } from "../types";
+import type { AudioFxSettings, CardSettings, Project, ProjectKind, Recording, VideoSettings } from "../types";
 import { DEFAULT_RESOLUTION } from "../render/renderLesson";
 import { DEFAULT_TAUGHT_LANGUAGE } from "../config/languages";
 
@@ -161,6 +161,27 @@ export function normalizeProject(raw: any): Project {
     captions: raw?.captions ?? {},
     renders: Array.isArray(raw?.renders) ? raw.renders : [],
     usage: raw?.usage ?? base.usage,
+  };
+}
+
+/**
+ * What a new main recording replaces. Everything derived from the old one —
+ * its lines and takes, cuts, cleaned-up audio, titles, captions and videos —
+ * describes a recording that is gone, so it all goes with it. One place, so
+ * the record, story and video steps cannot drift apart.
+ */
+export function freshRecordingPatch(recording: Recording): Partial<Project> {
+  return {
+    recording,
+    lines: [],
+    cuts: [],
+    processed: undefined,
+    titles: {},
+    captions: {},
+    renders: [],
+    approvedAt: undefined,
+    timesSource: undefined,
+    step: "record",
   };
 }
 

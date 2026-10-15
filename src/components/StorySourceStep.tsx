@@ -52,6 +52,7 @@ import {
   toScript,
 } from "../utils/storyText";
 import { ErrorNote } from "./ui";
+import { freshRecordingPatch } from "../utils/projectStore";
 
 export type StorySourceStepProps = RecordStepProps;
 
@@ -158,16 +159,7 @@ export default function StorySourceStep({ project, settings, audio, audioError, 
       const decoded = await decodeAudio(blob);
       if (decoded.duration < 0.5) throw new Error("That recording is too short to use.");
       update({
-        recording: { blob, mimeType: blob.type || "audio/webm", durationSeconds: decoded.duration, fileName },
-        lines: [],
-        cuts: [],
-        processed: undefined,
-        titles: {},
-        captions: {},
-        renders: [],
-        approvedAt: undefined,
-        timesSource: undefined,
-        step: "record",
+        ...freshRecordingPatch({ blob, mimeType: blob.type || "audio/webm", durationSeconds: decoded.duration, fileName }),
       });
     } catch (err) {
       setProblem(err instanceof Error ? err.message : String(err));

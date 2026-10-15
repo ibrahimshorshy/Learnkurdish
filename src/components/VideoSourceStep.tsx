@@ -14,7 +14,7 @@ import { loadRecordingAudio } from "../audio/useRecordingAudio";
 import { formatTime } from "../audio/audioTools";
 import { findTextModel } from "../config/models";
 import { useObjectUrl } from "../utils/useObjectUrl";
-import { formatBytes } from "../utils/projectStore";
+import { formatBytes, freshRecordingPatch } from "../utils/projectStore";
 import { extractVideoAudio, readVideoMeta } from "../utils/mediaApi";
 
 export interface VideoSourceStepProps {
@@ -123,21 +123,12 @@ export default function VideoSourceStep({ project, settings, audio, busy, update
                 height: extracted.height || meta?.height || 0,
                 fileName: file.name,
               },
-              recording: {
+              ...freshRecordingPatch({
                 blob: extracted.wav,
                 mimeType: "audio/wav",
                 durationSeconds: decoded.buffer.duration,
                 fileName: file.name,
-              },
-              lines: [],
-              cuts: [],
-              processed: undefined,
-              titles: {},
-              captions: {},
-              renders: [],
-              approvedAt: undefined,
-              timesSource: undefined,
-              step: "record",
+              }),
             }
       );
     } catch (err) {

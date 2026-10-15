@@ -7,6 +7,7 @@ import { useRecorder } from "../audio/useRecorder";
 import { decodeAudio, formatTime } from "../audio/audioTools";
 import { findTextModel } from "../config/models";
 import { useObjectUrl } from "../utils/useObjectUrl";
+import { freshRecordingPatch } from "../utils/projectStore";
 
 export interface RecordStepProps {
   project: Project;
@@ -64,21 +65,12 @@ export default function RecordStep({ project, settings, audio, audioError, busy,
       const decoded = await decodeAudio(blob);
       if (decoded.duration < 0.5) throw new Error("That recording is too short to use.");
       update({
-        recording: {
+        ...freshRecordingPatch({
           blob,
           mimeType: blob.type || "audio/webm",
           durationSeconds: decoded.duration,
           fileName,
-        },
-        lines: [],
-        cuts: [],
-        processed: undefined,
-        titles: {},
-        captions: {},
-        renders: [],
-        approvedAt: undefined,
-        timesSource: undefined,
-        step: "record",
+        }),
       });
     } catch (err) {
       setProblem(err instanceof Error ? err.message : String(err));

@@ -310,9 +310,15 @@ export default function OutputStep({ project, sources, settings, ffmpeg, logoSrc
           </div>
 
           <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
-            <Toggle checked={v.showTransliteration} onChange={(on) => setVideo({ showTransliteration: on })}>
-              Show pronunciation
-            </Toggle>
+            {project.kind === "story" && v.storyTranslation === "paragraph" ? (
+              <span className="text-paper/45" title="The story video shows pronunciation with the sentence translation only">
+                Pronunciation shows with “The sentence being read”
+              </span>
+            ) : (
+              <Toggle checked={v.showTransliteration} onChange={(on) => setVideo({ showTransliteration: on })}>
+                Show pronunciation
+              </Toggle>
+            )}
             <Toggle checked={v.karaoke} onChange={(on) => setVideo({ karaoke: on })}>
               Highlight words as you speak
             </Toggle>
