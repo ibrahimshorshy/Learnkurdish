@@ -192,7 +192,7 @@ export interface PreparedSubtitles {
 
 /** Type sizes in 720-wide design units; smaller than a lesson card's, because the picture is the point. */
 const TYPE = {
-  kurdish: { size: 42, min: 24, lineHeight: 1.36 },
+  kurdish: { size: 42, min: 30, lineHeight: 1.36 },
   translit: { size: 21, min: 14, lineHeight: 1.35, gap: 6 },
   first: { size: 29, min: 18, lineHeight: 1.4, gap: 12 },
   second: { size: 25, min: 16, lineHeight: 1.4, gap: 8 },
@@ -249,7 +249,10 @@ export async function prepareSubtitles(lines: LessonLine[], options: SubtitleOpt
         weight: "bold",
         family: FONTS.kurdish,
         gapBefore: 0,
-        yieldOrder: 0,
+        // A long sentence gives up some of the Kurdish's size before the
+        // translation shrinks: the Kurdish starts larger, and the translation
+        // is what most viewers read first. It never goes below its minimum.
+        yieldOrder: 5,
       },
       {
         text: options.showTransliteration ? line.transliteration.trim() : "",

@@ -386,7 +386,12 @@ export function registerAudioRoutes(app: Express) {
         .slice(-4)
         .join("\n");
       console.error("Audio clean-up failed:", detail);
-      return res.status(500).json({ error: `Could not clean up the audio. ${detail}`.trim() });
+      if (/Invalid data found|could not find codec|does not contain any stream|Output file .* does not contain/i.test(detail)) {
+        return res.status(400).json({ error: "This file could not be read as audio, so it was not cleaned up." });
+      }
+      // ffmpeg's own words, minus the temporary file paths that mean nothing to anyone.
+      const said = detail.replace(new RegExp(`${os.tmpdir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^\\s:]*`, "g"), "the file");
+      return res.status(500).json({ error: `Could not clean up the audio. ${said}`.trim() });
     } finally {
       if (uploaded) fs.rmSync(uploaded, { force: true });
       if (workDir) fs.rmSync(workDir, { recursive: true, force: true });
