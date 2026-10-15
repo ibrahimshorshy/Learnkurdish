@@ -23,7 +23,11 @@ import { fingerprint, outputKey } from "../lessonActions";
 import { newId } from "../utils/projectStore";
 import { downloadBlob } from "../utils/download";
 import { useObjectUrl } from "../utils/useObjectUrl";
-import { renderSubtitledVideo } from "../utils/mediaApi";
+import { joinVideos, renderSubtitledVideo } from "../utils/mediaApi";
+import { loadCardsInput, prepareCardOnly } from "../render/cards";
+import { renderVideo } from "../render/videoOutput";
+import { themeFor } from "../render/themes";
+import IntroOutroPanel from "./IntroOutroPanel";
 import { ErrorNote, Field, Segmented, Toggle, VideoCard, languagesLabel } from "./ui";
 import { outputChoices, videoFileName } from "./OutputStep";
 
@@ -33,6 +37,8 @@ export interface SubtitleOutputStepProps {
   settings: AppSettings;
   ffmpeg: boolean | null;
   logoSrc: string;
+  /** The recording is still being cleaned up in the background. */
+  processing?: boolean;
   update: (patch: Partial<Project> | ((p: Project) => Partial<Project>)) => void;
 }
 
@@ -68,7 +74,14 @@ async function cleanedSound(project: Project): Promise<Blob | null> {
   return encodeWavMono(out, audio.buffer.sampleRate);
 }
 
-export default function SubtitleOutputStep({ project, ffmpeg, logoSrc, update }: SubtitleOutputStepProps) {
+export default function SubtitleOutputStep({
+  project,
+  settings,
+  ffmpeg,
+  logoSrc,
+  processing,
+  update,
+}: SubtitleOutputStepProps) {
   const v = project.video;
   const source = project.sourceVideo;
   const setVideo = (patch: Partial<VideoSettings>) => update((p) => ({ video: { ...p.video, ...patch } }));
@@ -255,12 +268,47 @@ export default function SubtitleOutputStep({ project, ffmpeg, logoSrc, update }:
           }
         );
 
+        // Title and closing cards, drawn like every other kind's and joined on
+        // either side of the subtitled video.
+        let finished = blob;
+        let total = duration;
+        if (snapshot.intro.enabled || snapshot.outro.enabled) {
+          report("Making the title and closing cards…", 1);
+          const cards = await loadCardsInput(snapshot, langs);
+          const cardOptions = {
+            width: subs.width,
+            languages: langs,
+            titles: snapshot.titles,
+            theme: themeFor(v.themes, langs),
+            logoSrc,
+          };
+          const parts: Blob[] = [];
+          const intro = await prepareCardOnly("intro", cardOptions, cards);
+          if (intro) {
+            const made = await renderVideo(intro, undefined, signal);
+            parts.push(made.blob);
+            total += made.durationSeconds + 0.4;
+          }
+          parts.push(blob);
+          const outro = await prepareCardOnly("outro", cardOptions, cards);
+          if (outro) {
+            const made = await renderVideo(outro, undefined, signal);
+            parts.push(made.blob);
+            total += made.durationSeconds + 0.4;
+          }
+          cancelled();
+          if (parts.length > 1) {
+            report("Joining the cards to the video…", 1);
+            finished = await joinVideos(parts, subs.width, subs.height, signal);
+          }
+        }
+
         const video: RenderedVideo = {
           id: newId("v"),
           languages: langs,
-          blob,
+          blob: finished,
           createdAt: Date.now(),
-          durationSeconds: duration,
+          durationSeconds: total,
           fingerprint: fingerprint(snapshot, langs),
         };
         // Saved as each one lands, so a failure later keeps the earlier ones.
@@ -331,6 +379,11 @@ export default function SubtitleOutputStep({ project, ffmpeg, logoSrc, update }:
                     : "The video's own sound — the clean-up has not been applied yet (Transcript step)."}
               </p>
               {usingCleanSound && <p className="text-xs text-paper/45 mt-1">The preview plays the video's own sound.</p>}
+              {processing && (
+                <p className="text-xs text-kurd-sun mt-1">
+                  Still cleaning up the sound — a video made now uses the video's own sound.
+                </p>
+              )}
             </Field>
           </div>
           <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
@@ -339,6 +392,8 @@ export default function SubtitleOutputStep({ project, ffmpeg, logoSrc, update }:
             </Toggle>
           </div>
         </section>
+
+        <IntroOutroPanel project={project} settings={settings} update={update} />
 
         <section className="card p-5 space-y-4">
           <h2 className="text-lg font-bold">Videos to make</h2>

@@ -68,8 +68,6 @@ interface Shared {
 }
 
 export default function IntroOutroPanel(props: Props) {
-  // A video project is your own video from start to finish; there are no cards around it.
-  if (props.project.kind === "video") return null;
   return <CardsPanel {...props} />;
 }
 

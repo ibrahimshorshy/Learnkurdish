@@ -376,6 +376,7 @@ export default function App() {
                 <SubtitleOutputStep
                   project={project}
                   sources={audio.sources}
+                  processing={audio.processing.state === "processing"}
                   settings={settings}
                   ffmpeg={health?.ffmpeg ?? null}
                   logoSrc={logoSrc}

@@ -209,3 +209,20 @@ export async function renderSubtitledVideo(
     options.signal?.removeEventListener("abort", cancelOnServer);
   }
 }
+
+/**
+ * Joins MP4 parts end to end on the server: a video project's title card, the
+ * subtitled video and its closing card become one file.
+ */
+export async function joinVideos(parts: Blob[], width: number, height: number, signal?: AbortSignal): Promise<Blob> {
+  const form = new FormData();
+  parts.forEach((part, i) => form.append("parts", part, `part${i}.mp4`));
+  form.append("width", String(width));
+  form.append("height", String(height));
+  const res = await fetch("/api/render/join", { method: "POST", body: form, signal });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail?.error || `Joining the cards to the video failed (HTTP ${res.status}).`);
+  }
+  return res.blob();
+}

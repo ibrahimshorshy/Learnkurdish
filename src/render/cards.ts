@@ -22,7 +22,9 @@ import type { ScheduledClip } from "./audioMixdown";
 import type { PreparedLesson } from "./renderLesson";
 import { findAudienceLanguage, type VideoStrings } from "../config/languages";
 import { drawWrappedText, easeOutCubic, isRtlText } from "./textLayout";
-import { BASE, familyFor } from "./frameKit";
+import { BASE, familyFor, loadImage, makeFrameKit } from "./frameKit";
+import type { ThemeId } from "./themes";
+import { ensureAllFontsLoaded } from "../utils/fontLoader";
 import { REEL_SAFE, fitTextStack, safeTextWidth, type PlacedBlock, type StackBlock } from "./safeArea";
 import { eventAt, type Timeline, type TimelineEvent } from "./timeline";
 import { loadRecordingAudio } from "../audio/useRecordingAudio";
@@ -433,3 +435,42 @@ export function cardAt(prepared: PreparedLesson, t: number): "intro" | "outro" |
   const e = eventAt(prepared.timeline, t);
   return e?.type === "intro" || e?.type === "outro" ? e.type : null;
 }
+
+/**
+ * One card on its own — the title card or the closing card with nothing
+ * inside it — for a video project, where the middle is the uploaded video
+ * and the card clips are joined on either side of it. Drawn on the theme's
+ * background with the logo, tagline and title, exactly like the cards of the
+ * other kinds. Null when that card is switched off.
+ */
+export async function prepareCardOnly(
+  which: "intro" | "outro",
+  options: { width: number; languages: string[]; titles: Record<string, string>; theme: ThemeId; logoSrc: string },
+  cards: CardsInput
+): Promise<PreparedLesson | null> {
+  const card = cards[which];
+  if (!card.enabled) return null;
+  await ensureAllFontsLoaded();
+  const kit = makeFrameKit({
+    width: options.width,
+    theme: options.theme,
+    languages: options.languages,
+    titles: options.titles,
+    logo: await loadImage(options.logoSrc),
+  });
+  const empty: PreparedLesson = {
+    width: kit.width,
+    height: kit.height,
+    timeline: { events: [], total: 0 },
+    clips: [],
+    theme: kit.theme,
+    languages: options.languages,
+    titles: options.titles,
+    strings: kit.strings,
+    draw: kit.drawBackdrop,
+    drawBackdrop: kit.drawBackdrop,
+  };
+  const off: CardInput = { enabled: false, texts: [], clips: [] };
+  return wrapWithCards(empty, which === "intro" ? { intro: card, outro: off } : { intro: off, outro: card });
+}
+
