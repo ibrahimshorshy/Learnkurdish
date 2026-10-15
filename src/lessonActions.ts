@@ -283,8 +283,10 @@ export function fingerprint(project: Project, languages: string[]): string {
     speakers: project.kind === "dialogue" ? project.speakers.map((s) => s.name) : undefined,
     intro: card(project.intro),
     outro: card(project.outro),
-    cuts: project.cuts.map((c) => [Math.round(c.start * 100), Math.round(c.end * 100)]),
-    fx: project.audioFx,
+    // Video projects never cut or tighten, so those settings cannot change one.
+    cuts:
+      project.kind === "video" ? [] : project.cuts.map((c) => [Math.round(c.start * 100), Math.round(c.end * 100)]),
+    fx: project.kind === "video" ? { preset: project.audioFx.preset, room: project.audioFx.room } : project.audioFx,
     processed: project.processed?.key,
     lines: project.lines
       .filter((l) => !l.skip)
