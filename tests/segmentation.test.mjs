@@ -266,13 +266,14 @@ keeps(
   "times drifting late keep every line's first word"
 );
 
-// The same through real (synthesized) audio: a sentence, a stumble, the next sentence.
+// The same through real (synthesized) audio: a sentence, a stumble, the next
+// sentence, with a clear pause either side of the stumble.
 const withStumble = synth([
   { pause: 0.5 },
   { speech: [0.3, 0.35, 0.3] },
-  { pause: 0.9 },
+  { pause: 1.2 },
   { speech: [0.3, 0.2] }, // a false start
-  { pause: 0.8 },
+  { pause: 1.2 },
   { speech: [0.35, 0.3, 0.4] },
   { pause: 0.7 },
 ]);
@@ -296,5 +297,85 @@ check(
     stumbleSnapped[1].start <= sentenceB.start + 0.02 && stumbleSnapped[1].end >= sentenceB.end - 0.02,
   JSON.stringify(stumbleSnapped)
 );
+
+// A stumble with under a second either side cannot be told from a word the
+// model's edge missed by that much, so it is kept and nothing is lost.
+{
+  const close = synth([
+    { pause: 0.5 },
+    { speech: [0.3, 0.35, 0.3] },
+    { pause: 0.9 },
+    { speech: [0.3, 0.2] },
+    { pause: 0.8 },
+    { speech: [0.35, 0.3, 0.4] },
+    { pause: 0.7 },
+  ]);
+  const [a, stumbleRun, b] = close.lines;
+  const got = snapLinesToPauses(
+    [
+      { start: a.start + 0.1, end: a.end - 0.1 },
+      { start: b.start + 0.1, end: b.end - 0.15 },
+    ],
+    analyzeSpeech(close.samples, RATE)
+  );
+  const covered = (w) => got.some((r) => r.start <= w.start + 0.02 && r.end >= w.end - 0.02);
+  check("audio: a stumble close to both sentences is kept, every sentence whole", covered(a) && covered(b) && covered(stumbleRun), JSON.stringify(got));
+}
+
+// Model edges up to a second out must never drop a word, whatever the pauses
+// around it (a slow reader's comma, a one-word line).
+{
+  // A sentence "phrase, word." read slowly, then the next sentence; the model
+  // ends the first sentence up to a second early.
+  const slow = synth([
+    { pause: 1.0 },
+    { speech: [0.4, 0.5, 0.6] },
+    { pause: 0.7 },
+    { speech: [0.3] },
+    { pause: 0.9 },
+    { speech: [0.5, 0.6, 0.7] },
+    { pause: 0.8 },
+  ]);
+  const analysis = analyzeSpeech(slow.samples, RATE);
+  const [phrase, lastWord, next] = slow.lines;
+  for (const early of [0.5, 0.7, 0.9, 1.0]) {
+    const got = snapLinesToPauses([{ start: phrase.start, end: lastWord.end - early }, { start: next.start, end: next.end }], analysis);
+    check(
+      `audio: the model ending a sentence ${early}s early keeps its last word`,
+      got[0].start <= phrase.start + 0.02 && got[0].end >= lastWord.end - 0.02,
+      JSON.stringify(got)
+    );
+  }
+}
+{
+  // A one-word line (a vocabulary lesson, a dialogue reply) the model times
+  // up to a second late, over the silence after it.
+  const words = synth([
+    { pause: 1.0 },
+    { speech: [0.35, 0.4] },
+    { pause: 1.0 },
+    { speech: [0.2] },
+    { pause: 0.9 },
+    { speech: [0.4, 0.45] },
+    { pause: 0.8 },
+  ]);
+  const analysis = analyzeSpeech(words.samples, RATE);
+  const [one, word, three] = words.lines;
+  for (const late of [0.5, 0.8, 0.9, 1.0]) {
+    const got = snapLinesToPauses(
+      [
+        { start: one.start, end: one.end },
+        { start: word.start + late, end: word.end + late },
+        { start: three.start, end: three.end },
+      ],
+      analysis
+    );
+    check(
+      `audio: a one-word line timed ${late}s late keeps its word, and the next line its start`,
+      got[1].start <= word.start + 0.02 && got[1].end >= word.end - 0.02 && got[2].start <= three.start + 0.02,
+      JSON.stringify(got)
+    );
+  }
+}
 
 done("segmentation");

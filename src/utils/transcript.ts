@@ -188,17 +188,23 @@ export function normalizeTranscript(
     // previous one is the model being imprecise, so it is moved up to it and
     // the overlap pass below shares out the time. Sorting instead would put
     // a later sentence before an earlier one, and a paragraph start with it.
+    //
+    // Measured on the model's own times, before clamping to the recording's
+    // end: two lines that both run past the end would otherwise look like one
+    // inside the other.
+    let prevStart = parsed[0].start as number;
     for (let i = 1; i < lines.length; i++) {
-      const prev = lines[i - 1];
-      const cur = lines[i];
-      const crossed = cur.start < prev.start;
-      if (crossed) cur.start = prev.start;
+      const rawStart = parsed[i].start as number;
+      const crossed = rawStart < prevStart;
+      const start = crossed ? prevStart : rawStart;
       // A line's own time is what the line before does not already cover. One
       // the model put wholly inside the line before has none, which the text
       // order rules out, and the overlap pass could only leave it a sliver
       // that still overlaps. A line moved up needs a little more than none.
-      const own = cur.end - Math.max(cur.start, prev.end);
+      const own = (parsed[i].end as number) - Math.max(start, parsed[i - 1].end as number);
       if (crossed ? own < MIN_OWN_TIME : own <= 0) return untrusted();
+      lines[i].start = Math.min(start, duration);
+      prevStart = start;
     }
   } else {
     lines.sort((a, b) => a.start - b.start);

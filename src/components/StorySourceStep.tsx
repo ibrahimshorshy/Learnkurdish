@@ -586,7 +586,7 @@ function RecorderControls({
       type="button"
       onClick={live ? onStop : onStart}
       disabled={blocked}
-      className={`relative shrink-0 rounded-full flex items-center justify-center transition-all cursor-pointer ${
+      className={`relative shrink-0 rounded-full flex items-center justify-center transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 ${
         compact ? "w-14 h-14" : "w-24 h-24"
       } ${live ? "bg-kurd-red recording-pulse" : "bg-gradient-to-br from-brand-blue to-brand-green hover:scale-105"}`}
       aria-label={live ? "Stop recording" : "Start recording"}
@@ -612,6 +612,8 @@ function RecorderControls({
     <span className="text-sm text-paper/70 flex items-center gap-2">
       <Loader2 size={16} className="animate-spin" /> Reading the recording…
     </span>
+  ) : blocked ? (
+    <span className="text-sm text-paper/50">Finding the sentences — record again once it is done</span>
   ) : (
     <span className="text-sm text-paper/50">Tap to start recording</span>
   );

@@ -128,6 +128,36 @@ check(
   "keepOrder: untrusted, the text order and paragraph starts are kept",
   contained.lines.map((l) => l.text).join() === "a,b,c" && contained.lines[1].paragraphStart === true && !contained.lines[2].paragraphStart
 );
+
+// The model running a little past the end of the recording (within the
+// allowed 5% + 0.5 s): the last two lines both end after it. Clamped to the
+// end they would look like one inside the other, but the model's own times
+// are in order, so they are trusted and only clamped.
+const pastEnd = normalizeTranscript(
+  [
+    { text: "a", start: 1, end: 20 },
+    { text: "b", start: 20.6, end: 27.6 },
+    { text: "c", start: 28.3, end: 30.8 },
+    { text: "d", start: 30.2, end: 31.5 },
+  ],
+  30.5,
+  { keepOrder: true }
+);
+check("keepOrder: lines running past the end are still trusted", pastEnd.timesTrusted, JSON.stringify(pastEnd.lines));
+check(
+  "keepOrder: past the end, clamped into the recording, in order, not overlapping",
+  pastEnd.lines.every((l, i) => l.end <= 30.5 && l.end > l.start && (i === 0 || l.start >= pastEnd.lines[i - 1].end - 1e-9)),
+  JSON.stringify(pastEnd.lines)
+);
+check(
+  "keepOrder: past the end, the same as without keepOrder",
+  JSON.stringify(pastEnd.lines) === JSON.stringify(normalizeTranscript([
+    { text: "a", start: 1, end: 20 },
+    { text: "b", start: 20.6, end: 27.6 },
+    { text: "c", start: 28.3, end: 30.8 },
+    { text: "d", start: 30.2, end: 31.5 },
+  ], 30.5).lines)
+);
 const barelyPast = normalizeTranscript(
   [
     { text: "a", start: 1, end: 3 },

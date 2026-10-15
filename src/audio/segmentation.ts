@@ -104,10 +104,11 @@ function snapEnd(t: number, analysis: SpeechAnalysis, window: number): number {
 /**
  * How far clear of both of the model's edges speech must lie for it to count
  * as left out on purpose rather than as an edge the model misjudged. The
- * model's times are often a few hundred milliseconds out, so this is more
- * than that.
+ * model's times are often a few hundred milliseconds out and on a slow reading
+ * can be most of a second, and a word dropped from a clip is far worse than a
+ * stumble kept in one, so this allows for the whole second.
  */
-export const LEFT_OUT_MARGIN = 0.6;
+export const LEFT_OUT_MARGIN = 1.0;
 
 /**
  * How long the silence on each side of that speech must be. A first or last
@@ -152,6 +153,11 @@ function speechLeftOut(
   return first >= 0 && last >= first ? { first, last } : null;
 }
 
+/** Whether any speech falls inside `range`. */
+function holdsSpeech(runs: SpeechSegment[], range: TimeRange): boolean {
+  return runs.some((r) => r.end > range.start && r.start < range.end);
+}
+
 /**
  * Moves every boundary between two lines into the pause the model most
  * plausibly meant, then trims each line to its speech.
@@ -166,7 +172,9 @@ function speechLeftOut(
  * stumble, "sorry, again", a word to someone in the room; see speechLeftOut),
  * the two lines do not share a pause: each edge snaps to its own line's
  * speech, and the left-out part stays out of both clips instead of playing
- * while one of them is on screen.
+ * while one of them is on screen. That is only decided when the model's times
+ * for both lines hold speech: a line timed over silence has wrong times, and
+ * the speech in the gap next to it is most likely the line itself.
  */
 export function snapLinesToPauses(
   lines: TimeRange[],
@@ -184,7 +192,10 @@ export function snapLinesToPauses(
 
   let floor = 0;
   for (let i = 0; i + 1 < n; i++) {
-    const leftOut = speechLeftOut(runs, out[i].end, out[i + 1].start, floor);
+    const leftOut =
+      holdsSpeech(runs, lines[i]) && holdsSpeech(runs, lines[i + 1])
+        ? speechLeftOut(runs, out[i].end, out[i + 1].start, floor)
+        : null;
     if (leftOut) {
       // Speech between a model edge and what was left out is that line's own
       // (the edge was a little out), so the clip reaches to it. The long
