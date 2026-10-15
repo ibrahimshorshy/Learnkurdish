@@ -14,7 +14,13 @@ import {
   speakerSide,
   stackBubbles,
   visibleRange,
+  colorsDistinct,
+  dialogueSpeakerName,
+  parseColor,
+  speakerColors,
+  withAlpha,
 } from "../src/render/dialogueLayout.ts";
+import { THEMES } from "../src/render/themes.ts";
 import { check, near, done } from "./harness.mjs";
 
 const ckb = findTaughtLanguage("ckb");
@@ -183,5 +189,32 @@ const seen = visibleRange(longStack, longHeights, many - 1, shiftAt(longPlan, la
 check("a long dialogue draws only a handful of bubbles", seen.length > 0 && seen.length <= 6, String(seen.length));
 check("the newest is among them", seen[seen.length - 1] === many - 1);
 check("oldest first", seen.every((v, i) => i === 0 || v > seen[i - 1]));
+
+/* ---------- the speakers' colours ---------- */
+
+check("reads #rrggbb", JSON.stringify(parseColor("#33AFD5")) === "[51,175,213]");
+check("reads #rgb", JSON.stringify(parseColor("#fff")) === "[255,255,255]");
+check("reads rgba()", JSON.stringify(parseColor("rgba(4, 23, 48, 0.3)")) === "[4,23,48]");
+check("unreadable is null", parseColor("teal") === null);
+check("withAlpha rewrites the opacity", withAlpha("#33AFD5", 0.5) === "rgba(51, 175, 213, 0.5)");
+check("withAlpha leaves what it cannot read", withAlpha("teal", 0.5) === "teal");
+check("two golds are not distinct", !colorsDistinct("#C7A057", "#DAC192"));
+check("blue and green are distinct", colorsDistinct("#1D6989", "#456539"));
+check("dark and light are distinct", colorsDistinct("#041730", "#D7E1F2"));
+
+for (const theme of Object.values(THEMES)) {
+  const [a, b] = speakerColors(theme.palette);
+  check(`${theme.label}: the two speakers' colours are distinct`, colorsDistinct(a, b), `${a} vs ${b}`);
+  check(`${theme.label}: the first speaker keeps the accent`, a === theme.palette.accent);
+}
+check("Emerald keeps its gold for the second speaker", speakerColors(THEMES.emerald.palette)[1] === THEMES.emerald.palette.accentAlt);
+check("Cinematic's second speaker is not a second gold", speakerColors(THEMES.cinematic.palette)[1] !== THEMES.cinematic.palette.accentAlt);
+
+/* ---------- the speakers' names ---------- */
+
+check("a typed name is kept", dialogueSpeakerName("سارا", 1, "ar") === "سارا");
+check("the English placeholder becomes Arabic in an Arabic video", dialogueSpeakerName("Speaker 1", 0, "ar") === "المتحدث الأول");
+check("no name becomes the placeholder", dialogueSpeakerName("", 1, "en") === "Speaker 2");
+check("an unknown language falls back to English", dialogueSpeakerName(undefined, 0, "xx") === "Speaker 1");
 
 done("dialogue");

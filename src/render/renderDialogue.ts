@@ -18,7 +18,7 @@
 import { ensureAllFontsLoaded } from "../utils/fontLoader";
 import type { VideoStrings } from "../config/languages";
 import { findAudienceLanguage } from "../config/languages";
-import { FONTS, type ThemePalette } from "./themes";
+import { FONTS } from "./themes";
 import { easeOutBack, easeOutCubic, envelope, isRtlText, layoutText, type TextLayout } from "./textLayout";
 import { fitTextStack, type StackBlock } from "./safeArea";
 import type { ScheduledClip } from "./audioMixdown";
@@ -29,86 +29,17 @@ import {
   APPEAR_SECONDS,
   bubbleAlpha,
   currentBubble,
+  dialogueSpeakerName,
   planScroll,
   shiftAt,
   speakerIndex,
+  speakerColors,
   speakerSide,
   stackBubbles,
   visibleRange,
+  withAlpha,
   type ThreadGeometry,
 } from "./dialogueLayout";
-
-/* ------------------------------------------------------------------ */
-/* Colour                                                               */
-/* ------------------------------------------------------------------ */
-
-/** [r, g, b] from "#rgb", "#rrggbb" or "rgb(a)(…)"; null when unreadable. */
-function parseColor(color: string): [number, number, number] | null {
-  const c = color.trim();
-  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(c);
-  if (hex) {
-    const h = hex[1].length === 3 ? hex[1].replace(/./g, (x) => x + x) : hex[1];
-    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
-  }
-  const fn = /^rgba?\(([^)]+)\)$/i.exec(c);
-  if (fn) {
-    const [r, g, b] = fn[1].split(",").map((v) => Number(v.trim()));
-    if ([r, g, b].every((v) => Number.isFinite(v))) return [r, g, b];
-  }
-  return null;
-}
-
-function withAlpha(color: string, alpha: number): string {
-  const rgb = parseColor(color);
-  return rgb ? `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})` : color;
-}
-
-function distance(a: string, b: string): number {
-  const x = parseColor(a);
-  const y = parseColor(b);
-  if (!x || !y) return 255;
-  return Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]);
-}
-
-/**
- * The two speakers' colours, from the theme's own palette so every theme keeps
- * its character: the accent for the first speaker, the second accent for the
- * other. A theme whose two accents are close (Cinematic's are both gold) would
- * make the speakers hard to tell apart, so the second falls back to the next
- * palette colour that is clearly different.
- */
-export function speakerColors(palette: ThemePalette): [string, string] {
-  const first = palette.accent;
-  const second =
-    [palette.accentAlt, palette.translationAlt, palette.translation, palette.text].find(
-      (c) => distance(c, first) >= 70
-    ) ?? palette.accentAlt;
-  return [first, second];
-}
-
-/* ------------------------------------------------------------------ */
-/* Speakers                                                             */
-/* ------------------------------------------------------------------ */
-
-/** What an unnamed speaker is called on screen, in the video's language. */
-const DEFAULT_SPEAKER_NAMES: Record<string, [string, string]> = {
-  ar: ["المتحدث الأول", "المتحدث الثاني"],
-  en: ["Speaker 1", "Speaker 2"],
-  fa: ["گوینده‌ی اول", "گوینده‌ی دوم"],
-  tr: ["Konuşmacı 1", "Konuşmacı 2"],
-};
-
-/**
- * The name on a speaker's bubbles. A name the teacher typed is used as is;
- * none, or the app's English placeholder ("Speaker 1"), becomes the
- * placeholder in the video's own language, so an Arabic video never says
- * "Speaker 1".
- */
-export function dialogueSpeakerName(raw: string | undefined, index: 0 | 1, languageId: string): string {
-  const name = (raw ?? "").trim();
-  if (name && !/^speaker\s*\d+$/i.test(name)) return name;
-  return (DEFAULT_SPEAKER_NAMES[languageId] ?? DEFAULT_SPEAKER_NAMES.en)[index];
-}
 
 /* ------------------------------------------------------------------ */
 /* Bubble geometry, measured once                                       */
@@ -348,27 +279,22 @@ export async function prepareDialogue(options: PrepareOptions): Promise<Prepared
   const plan = planScroll(tops, heights, appear, geo);
   const wordStarts = wordTimings(lines, look.karaoke);
 
-  /* ---------- the thread's own layer ---------- */
-
-  // Bubbles are drawn into a layer of their own so the top of the thread can
-  // fade out under the header instead of being sliced off. Kept on the CPU,
-  // like the exporter's canvas, so no frame waits on a GPU read-back.
-  const layer = document.createElement("canvas");
-  layer.width = width;
-  layer.height = Math.ceil(viewHeight);
-  const g = layer.getContext("2d", { willReadFrequently: true })!;
-  const mask = g.createLinearGradient(0, 0, 0, layer.height);
-  mask.addColorStop(0, "rgba(0, 0, 0, 0)");
-  mask.addColorStop(Math.min(0.45, geo.fadeTop / layer.height), "rgba(0, 0, 0, 1)");
-  mask.addColorStop(Math.max(0.55, 1 - (geo.padBottom * 0.6) / layer.height), "rgba(0, 0, 0, 1)");
-  mask.addColorStop(1, "rgba(0, 0, 0, 0)");
+  /* ---------- drawing a bubble ---------- */
 
   const bubbleBase = palette.isLight ? "rgba(255, 255, 255, 0.86)" : "rgba(2, 6, 14, 0.4)";
+  // How far a bubble may reach below the thread: room for the glow of the
+  // newest one, never as far as the cue or the counter.
+  const glowRoom = 14 * s;
 
-  const drawText = (block: BubbleText, x: number, y: number, w: number, highlight?: { upTo: number; color: string }) => {
-    const left = x + padX;
-    const right = x + w - padX;
-    const anchor = block.rtl ? right : left;
+  const drawText = (
+    g: CanvasRenderingContext2D,
+    block: BubbleText,
+    x: number,
+    y: number,
+    w: number,
+    highlight?: { upTo: number; color: string }
+  ) => {
+    const anchor = block.rtl ? x + w - padX : x + padX;
     g.font = block.font;
     g.direction = block.rtl ? "rtl" : "ltr";
     g.textAlign = block.rtl ? "right" : "left";
@@ -380,8 +306,8 @@ export async function prepareDialogue(options: PrepareOptions): Promise<Prepared
         g.fillText(line.text, anchor, lineY);
         return;
       }
-      line.words.forEach((word, w) => {
-        g.fillStyle = block.layout.lineWordStart[k] + w < highlight.upTo ? highlight.color : block.color;
+      line.words.forEach((word, n) => {
+        g.fillStyle = block.layout.lineWordStart[k] + n < highlight.upTo ? highlight.color : block.color;
         g.fillText(word.text, block.rtl ? anchor - word.offset : anchor + word.offset, lineY);
       });
     });
@@ -389,6 +315,7 @@ export async function prepareDialogue(options: PrepareOptions): Promise<Prepared
   };
 
   const drawBubble = (
+    g: CanvasRenderingContext2D,
     b: Bubble,
     y: number,
     alpha: number,
@@ -405,15 +332,23 @@ export async function prepareDialogue(options: PrepareOptions): Promise<Prepared
     g.fill();
 
     // The speaking bubble is outlined in its speaker's colour and glows with
-    // the voice; the others keep a quiet edge.
+    // the voice; the others keep a quiet edge. The glow is a few wide, faint
+    // strokes rather than a canvas shadow, which costs a blur of the whole
+    // bubble on every frame.
     if (state.current) {
-      g.save();
-      g.shadowColor = withAlpha(color, palette.isLight ? 0.35 : 0.6);
-      g.shadowBlur = (8 + state.speaking * (12 + 16 * state.voice)) * s;
+      const strength = (palette.isLight ? 0.6 : 1) * (0.5 + state.speaking * (0.3 + 0.5 * state.voice));
+      for (const [widthUnits, a] of [
+        [18, 0.05],
+        [12, 0.08],
+        [7, 0.13],
+      ]) {
+        g.strokeStyle = withAlpha(color, Math.min(1, a * strength * 1.6));
+        g.lineWidth = widthUnits * s;
+        g.stroke();
+      }
       g.strokeStyle = color;
       g.lineWidth = 2.4 * s;
       g.stroke();
-      g.restore();
     } else {
       g.strokeStyle = withAlpha(color, 0.5);
       g.lineWidth = 1.2 * s;
@@ -438,21 +373,45 @@ export async function prepareDialogue(options: PrepareOptions): Promise<Prepared
     }
 
     if (b.kurdish) {
-      drawText(
-        b.kurdish,
-        b.x,
-        y,
-        b.w,
-        state.highlight !== undefined ? { upTo: state.highlight, color } : undefined
-      );
+      drawText(g, b.kurdish, b.x, y, b.w, state.highlight !== undefined ? { upTo: state.highlight, color } : undefined);
     }
     if (b.divider !== null) {
       g.fillStyle = palette.isLight ? "rgba(4, 23, 48, 0.12)" : "rgba(255, 255, 255, 0.12)";
       g.fillRect(b.x + padX, y + b.divider - 0.5 * s, b.w - padX * 2, Math.max(1, 1 * s));
     }
-    for (const block of b.rest) drawText(block, b.x, y, b.w);
+    for (const block of b.rest) drawText(g, block, b.x, y, b.w);
 
     g.restore();
+  };
+
+  /* ---------- the fade under the header ---------- */
+
+  // Older bubbles scroll up and melt into the background instead of being
+  // sliced off at the top. Rather than drawing the whole thread into a layer
+  // and masking it — a full-frame blend on every frame — only a thin strip is
+  // repainted: the background as it is at this moment, opaque at the top of
+  // the thread and clear by the end of the fade, laid over the bubbles.
+  const band = document.createElement("canvas");
+  band.width = width;
+  band.height = Math.max(1, Math.ceil(geo.fadeTop));
+  const bandCtx = band.getContext("2d", { willReadFrequently: true })!;
+  const bandMask = bandCtx.createLinearGradient(0, 0, 0, band.height);
+  bandMask.addColorStop(0, "rgba(0, 0, 0, 1)");
+  bandMask.addColorStop(0.35, "rgba(0, 0, 0, 0.75)");
+  bandMask.addColorStop(1, "rgba(0, 0, 0, 0)");
+
+  const drawFade = (ctx: CanvasRenderingContext2D, elapsed: number, voice: number) => {
+    bandCtx.clearRect(0, 0, band.width, band.height);
+    bandCtx.save();
+    bandCtx.translate(0, -threadTop);
+    kit.drawBackdrop(bandCtx, elapsed, voice);
+    bandCtx.restore();
+    bandCtx.save();
+    bandCtx.globalCompositeOperation = "destination-in";
+    bandCtx.fillStyle = bandMask;
+    bandCtx.fillRect(0, 0, band.width, band.height);
+    bandCtx.restore();
+    ctx.drawImage(band, 0, threadTop);
   };
 
   /* ---------- the frame ---------- */
@@ -463,15 +422,25 @@ export async function prepareDialogue(options: PrepareOptions): Promise<Prepared
     const event = eventAt(timeline, elapsed);
     const current = currentBubble(appear, elapsed);
 
-    if (current >= 0 && bubbles.length) {
+    // The thread fades out over the silence after the last line, as a lesson's
+    // last line does, so the closing card follows without a hard cut.
+    const ending = Math.min(1, Math.max(0, (total - elapsed) / 0.35));
+
+    if (current >= 0 && bubbles.length && ending > 0) {
       const shift = shiftAt(plan, elapsed);
-      g.clearRect(0, 0, layer.width, layer.height);
+      let reachesFade = false;
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, threadTop, width, viewHeight + glowRoom);
+      ctx.clip();
 
       for (const i of visibleRange(tops, heights, current, shift, viewHeight, 40 * s)) {
         const b = bubbles[i];
-        const alpha = bubbleAlpha(i, appear, elapsed);
+        const alpha = bubbleAlpha(i, appear, elapsed) * ending;
         if (alpha <= 0.002) continue;
-        let y = tops[i] + shift;
+        let y = threadTop + tops[i] + shift;
+        if (y - glowRoom < threadTop + geo.fadeTop) reachesFade = true;
 
         const isCurrent = i === current;
         let speaking = 0;
@@ -490,6 +459,7 @@ export async function prepareDialogue(options: PrepareOptions): Promise<Prepared
             }
           }
         }
+        const state = { current: isCurrent, speaking, voice, elapsed, highlight };
 
         // The newest bubble slides up from its own side and settles with a
         // small overshoot, anchored at its tail corner.
@@ -499,23 +469,19 @@ export async function prepareDialogue(options: PrepareOptions): Promise<Prepared
           const scale = 0.9 + 0.1 * easeOutBack(p);
           const anchorX = b.side === "left" ? b.x : b.x + b.w;
           y += (1 - easeOutCubic(p)) * 26 * s;
-          g.save();
-          g.translate(anchorX, y + b.h);
-          g.scale(scale, scale);
-          g.translate(-anchorX, -(y + b.h));
-          drawBubble(b, y, alpha, { current: isCurrent, speaking, voice, elapsed, highlight });
-          g.restore();
+          ctx.save();
+          ctx.translate(anchorX, y + b.h);
+          ctx.scale(scale, scale);
+          ctx.translate(-anchorX, -(y + b.h));
+          drawBubble(ctx, b, y, alpha, state);
+          ctx.restore();
           continue;
         }
-        drawBubble(b, y, alpha, { current: isCurrent, speaking, voice, elapsed, highlight });
+        drawBubble(ctx, b, y, alpha, state);
       }
+      ctx.restore();
 
-      g.save();
-      g.globalCompositeOperation = "destination-in";
-      g.fillStyle = mask;
-      g.fillRect(0, 0, layer.width, layer.height);
-      g.restore();
-      ctx.drawImage(layer, 0, threadTop);
+      if (reachesFade) drawFade(ctx, elapsed, voice);
     }
 
     // The cue: listen, listen again, your turn — as in the lesson.

@@ -19,6 +19,8 @@
  * All lengths are in output pixels and all times in seconds.
  */
 
+import type { ThemePalette } from "./themes";
+
 export interface ThreadGeometry {
   /** Height of the visible thread, from its top edge to its bottom edge. */
   viewHeight: number;
@@ -176,4 +178,103 @@ export function visibleRange(
     out.push(i);
   }
   return out.reverse();
+}
+
+/* ------------------------------------------------------------------ */
+/* The speakers' colours                                                */
+/* ------------------------------------------------------------------ */
+
+/** [r, g, b] from "#rgb", "#rrggbb" or "rgb(a)(…)"; null when unreadable. */
+export function parseColor(color: string): [number, number, number] | null {
+  const c = color.trim();
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(c);
+  if (hex) {
+    const h = hex[1].length === 3 ? hex[1].replace(/./g, (x) => x + x) : hex[1];
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+  }
+  const fn = /^rgba?\(([^)]+)\)$/i.exec(c);
+  if (fn) {
+    const [r, g, b] = fn[1].split(",").map((v) => Number(v.trim()));
+    if ([r, g, b].every((v) => Number.isFinite(v))) return [r, g, b];
+  }
+  return null;
+}
+
+/** The same colour at another opacity; a colour it cannot read is returned as is. */
+export function withAlpha(color: string, alpha: number): string {
+  const rgb = parseColor(color);
+  return rgb ? `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})` : color;
+}
+
+/** Hue in degrees, saturation and lightness 0..1. */
+function hsl([r, g, b]: [number, number, number]): [number, number, number] {
+  const [R, G, B] = [r / 255, g / 255, b / 255];
+  const max = Math.max(R, G, B);
+  const min = Math.min(R, G, B);
+  const l = (max + min) / 2;
+  const d = max - min;
+  if (d === 0) return [0, 0, l];
+  const sat = d / (1 - Math.abs(2 * l - 1));
+  let h = max === R ? ((G - B) / d) % 6 : max === G ? (B - R) / d + 2 : (R - G) / d + 4;
+  h *= 60;
+  return [h < 0 ? h + 360 : h, sat, l];
+}
+
+/**
+ * Whether two colours read as two different colours at a glance. Distance in
+ * RGB is a poor judge of that — two golds of different brightness can be
+ * further apart than a blue and a green — so this asks what a viewer sees: a
+ * clearly different hue, or a clearly different lightness.
+ */
+export function colorsDistinct(a: string, b: string): boolean {
+  const x = parseColor(a);
+  const y = parseColor(b);
+  if (!x || !y) return a.trim().toLowerCase() !== b.trim().toLowerCase();
+  const [h1, s1, l1] = hsl(x);
+  const [h2, s2, l2] = hsl(y);
+  if (Math.abs(l1 - l2) >= 0.3) return true;
+  // A grey has no hue to tell it apart by.
+  if (s1 < 0.15 || s2 < 0.15) return false;
+  const dh = Math.abs(h1 - h2);
+  return Math.min(dh, 360 - dh) >= 35;
+}
+
+/**
+ * The two speakers' colours, from the theme's own palette so every theme keeps
+ * its character: the accent for the first speaker, the second accent for the
+ * other. Where a theme's two accents are too alike to tell the speakers apart
+ * (Cinematic's are both gold), the second speaker takes the next palette
+ * colour that is clearly different.
+ */
+export function speakerColors(palette: ThemePalette): [string, string] {
+  const first = palette.accent;
+  const second =
+    [palette.accentAlt, palette.translationAlt, palette.translation, palette.text].find((c) =>
+      colorsDistinct(c, first)
+    ) ?? palette.accentAlt;
+  return [first, second];
+}
+
+/* ------------------------------------------------------------------ */
+/* The speakers' names                                                 */
+/* ------------------------------------------------------------------ */
+
+/** What an unnamed speaker is called on screen, in the video's language. */
+const DEFAULT_SPEAKER_NAMES: Record<string, [string, string]> = {
+  ar: ["المتحدث الأول", "المتحدث الثاني"],
+  en: ["Speaker 1", "Speaker 2"],
+  fa: ["گوینده‌ی اول", "گوینده‌ی دوم"],
+  tr: ["Konuşmacı 1", "Konuşmacı 2"],
+};
+
+/**
+ * The name on a speaker's bubbles. A name the teacher typed is used as is;
+ * none, or the app's English placeholder ("Speaker 1"), becomes the
+ * placeholder in the video's own language, so an Arabic video never says
+ * "Speaker 1".
+ */
+export function dialogueSpeakerName(raw: string | undefined, index: 0 | 1, languageId: string): string {
+  const name = (raw ?? "").trim();
+  if (name && !/^speaker\s*\d+$/i.test(name)) return name;
+  return (DEFAULT_SPEAKER_NAMES[languageId] ?? DEFAULT_SPEAKER_NAMES.en)[index];
 }

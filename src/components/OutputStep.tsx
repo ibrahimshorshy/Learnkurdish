@@ -18,7 +18,7 @@ import {
 import { prepareOutput } from "../render/kinds";
 import { loadCardsInput } from "../render/cards";
 import { fingerprint, outputKey, videoLinesFrom } from "../lessonActions";
-import { newId, speakerName } from "../utils/projectStore";
+import { newId } from "../utils/projectStore";
 import { asciiFileName, downloadBlob } from "../utils/download";
 import { formatTime, stopPlayback } from "../audio/audioTools";
 import { ErrorNote, Field, Segmented, Slider, Toggle, VideoCard, languagesLabel } from "./ui";
@@ -86,7 +86,9 @@ export default function OutputStep({ project, sources, settings, ffmpeg, logoSrc
 
   const lines = useMemo(() => videoLinesFrom(project, sources), [project.lines, project.cuts, project.audioFx, sources]); // eslint-disable-line react-hooks/exhaustive-deps
   const missingAudio = project.lines.filter((l) => !l.skip && l.kurdish.trim()).length - lines.length;
-  const speakers = project.speakers.map((_, i) => speakerName(project, i));
+  // Names as typed: the dialogue renderer labels an unnamed speaker in the
+  // video's own language rather than with an English "Speaker 1".
+  const speakers = project.speakers.map((sp) => sp.name.trim());
 
   /* ---------- preview ---------- */
 
