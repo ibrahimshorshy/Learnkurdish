@@ -100,7 +100,17 @@ It is written to `.env`, which is gitignored. You can also paste a key into
 
 **`ffmpeg` is required** for the MP4s, for audio clean-up and for video
 projects. Setup offers to install it on Windows (winget) and macOS (brew). On
-Linux: `sudo apt install ffmpeg`.
+Linux: `sudo apt install ffmpeg`. For iPhone HDR videos the usual ffmpeg builds
+are fine: the colours are tone-mapped to normal video (this needs ffmpeg's
+`zscale` filter, which those builds include).
+
+**The app answers only on this computer.** The server holds your Gemini key and
+runs ffmpeg on what it is sent, so it listens on `localhost` only and refuses
+requests from other websites. To open it from a phone or another computer on
+the same Wi-Fi, add `HOST=0.0.0.0` to `.env` and restart: the window then warns
+that network access is on and lists the addresses to open. Anyone on that
+network can then use the app, and your key with it, so switch it back off when
+you are done.
 
 <details>
 <summary>Other commands</summary>
@@ -108,6 +118,7 @@ Linux: `sudo apt install ffmpeg`.
 ```bash
 npm run dev                  # start without the setup checks
 PORT=3101 npm run dev        # on another port
+HOST=0.0.0.0 npm run dev     # reachable from other devices on your network
 npm run build && npm start   # production build
 npm run lint                 # typecheck
 npm test                     # unit tests

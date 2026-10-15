@@ -45,7 +45,10 @@ or a paid pack: a product from work already done.
 
 Phone microphones are often better than laptop ones, and you may want to record
 away from the desk. A QR code on screen that opens a simple recorder page on the
-phone (same Wi-Fi) and sends the take straight into the project.
+phone (same Wi-Fi) and sends the take straight into the project. The server
+now answers only on this computer, so this would open one narrow door for the
+phone (a single upload route with a one-time code in the QR) rather than
+switching on `HOST=0.0.0.0` for everything.
 
 ### 8. Background music under the voice
 
