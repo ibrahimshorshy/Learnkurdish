@@ -60,6 +60,22 @@ English, carry **your own clip** (recorded or uploaded), or stay **silent**.
 Its words can be typed, or written by the AI and written again. An AI clip
 whose words changed is left out of the video until you make it again.
 
+Cards work for every kind. On a video project they are off by default (your
+video usually has its own opening); switch them on and they are joined in
+front of and after the subtitled video, at the same size.
+
+## Stories
+
+Paste the text, or open a `.txt` or `.docx` file. Blank lines become
+paragraphs. Then read it aloud: the text sits beside the recorder as a large
+teleprompter (it can also fill the screen), and clicking a sentence, or ↑ ↓ in
+full screen, keeps your place. Because the words are already known, the
+AI only has to find where each sentence starts and ends in your reading
+(**Find each sentence in my reading**), so the spelling in the video is
+exactly the spelling you wrote. You can still move a paragraph break on the
+transcript step, and choose whether the translation shows per sentence or per
+paragraph.
+
 ## Running it
 
 You need [Node.js](https://nodejs.org) 20 or newer, and Chrome.

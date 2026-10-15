@@ -28,7 +28,9 @@ Each kind has its own tab and remembers its own open project. Lessons from
 ### Title and closing cards
 
 AI-written and AI-voiced in Arabic or English, your own recorded or uploaded
-clip, or silent — and written or voiced again on demand.
+clip, or silent — and written or voiced again on demand. They work on every
+kind, including video projects, where they are joined around the subtitled
+video.
 
 ### Look
 
