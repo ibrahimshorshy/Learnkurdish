@@ -205,15 +205,22 @@ if (ffmpegOk) {
       check("a hot recording through studio + room stays under full scale", peak <= 0.981, `peak ${peak.toFixed(3)}`);
     }
 
-    // Anything ffmpeg reads goes in — here an Opus file like the browser records.
+    // Only the WAV the browser sends goes in. Anything else (here an Opus file
+    // like the browser records) is refused before ffmpeg sees it, so ffmpeg
+    // never guesses a format; see tests/serverSecurity.test.mjs.
     try {
       const opusPath = path.join(dir, "in.webm");
       execFileSync("ffmpeg", ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", inputPath, "-c:a", "libopus", opusPath]);
       const work = fs.mkdtempSync(path.join(dir, "w-"));
-      const out = readWav((await processAudioFile(opusPath, "clean", false, work)).wav);
-      check("a WebM/Opus upload comes back as WAV of the same length (±10ms)", near(out.samples.length / PROCESS_RATE, seconds, 0.01), `${out.samples.length}`);
+      let refused = null;
+      try {
+        await processAudioFile(opusPath, "clean", false, work);
+      } catch (err) {
+        refused = err;
+      }
+      check("a WebM/Opus upload is refused as not WAV (415)", refused?.status === 415, String(refused?.message || "accepted"));
     } catch (err) {
-      console.log(`SKIP  WebM/Opus round trip: ${String(err?.message || err).split("\n")[0]}`);
+      console.log(`SKIP  WebM/Opus refusal: ${String(err?.message || err).split("\n")[0]}`);
     }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

@@ -1,9 +1,12 @@
 import express from "express";
+import http from "http";
+import os from "os";
 import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { hasFfmpeg } from "./server/ffmpeg";
+import { apiGuard, errorResponse, isLoopbackHost } from "./server/security";
 import { registerAiRoutes } from "./server/routes/ai";
 import { registerRenderRoutes } from "./server/routes/render";
 import { registerAudioRoutes } from "./server/routes/audio";
@@ -15,6 +18,21 @@ dotenv.config();
 const app = express();
 const PORT = Number(process.env.PORT) || 3100;
 
+/**
+ * This computer only, unless HOST says otherwise. The server spends the Gemini
+ * key in .env and runs ffmpeg on what it is sent, so other devices on the
+ * network are an explicit opt-in (HOST=0.0.0.0), never the default.
+ */
+const HOST_SETTING = (process.env.HOST || "").trim();
+const LAN = HOST_SETTING !== "" && !isLoopbackHost(HOST_SETTING);
+/**
+ * Both loopbacks: browsers and Node may resolve "localhost" to ::1 first
+ * (Windows does), and http://localhost:PORT has to keep working. It also has
+ * to stay the address the teacher opens, because the browser keeps the
+ * projects per address.
+ */
+const LISTEN_HOSTS = LAN ? [HOST_SETTING] : ["127.0.0.1", "::1"];
+
 /** Read from package.json so it cannot drift from the released version. */
 const APP_VERSION: string = (() => {
   try {
@@ -24,7 +42,16 @@ const APP_VERSION: string = (() => {
   }
 })();
 
-app.use(express.json({ limit: "25mb" }));
+/*
+ * Before anything reads a body: requests from other sites, or for another
+ * host name (DNS rebinding), are turned away first.
+ */
+app.use("/api", apiGuard({ lan: LAN }));
+
+// The largest JSON the app sends is a translate request with every line of a
+// long project (and the rest as context): well under a megabyte even for a
+// story of thousands of lines. Audio and video go as multipart, not JSON.
+app.use(express.json({ limit: "5mb" }));
 
 app.get("/api/health", async (_req, res) => {
   res.json({
@@ -45,9 +72,30 @@ registerMediaRoutes(app);
 /* ------------------------------------------------------------------ */
 
 app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
-  console.error("Unhandled API error:", err);
+  const { status, error } = errorResponse(err);
+  if (status >= 500) console.error("Unhandled API error:", err);
+  else console.warn(`Request refused (${status}): ${error}`);
   if (res.headersSent) return next(err);
-  return res.status(500).json({ error: err?.message || "Internal server error" });
+  return res.status(status).json({ error });
+});
+
+/*
+ * A last line of defence. An error thrown from a callback or a promise that
+ * nobody awaited would otherwise take the whole server down, and with it
+ * every other job and the teacher's open tab. Once the server is up, such an
+ * error is logged and the server carries on; before that (a port in use, Vite
+ * failing to start), it still stops the process.
+ */
+let started = false;
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection:", reason);
+  if (!started) process.exit(1);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception:", err);
+  if (!started) process.exit(1);
 });
 
 /**
@@ -57,13 +105,38 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
  */
 const PRODUCTION = process.env.NODE_ENV === "production" || /server\.cjs$/.test(process.argv[1] || "");
 
+function listenOn(host: string): Promise<http.Server> {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer(app);
+    server.once("error", reject);
+    server.listen(PORT, host, () => {
+      server.off("error", reject);
+      // Errors after start-up (running out of file handles, say) are logged, not fatal.
+      server.on("error", (err) => console.error(`Server error on ${host}:`, err));
+      resolve(server);
+    });
+  });
+}
+
+function lanAddresses(): string[] {
+  return Object.values(os.networkInterfaces())
+    .flat()
+    .filter((a): a is os.NetworkInterfaceInfo => Boolean(a && a.family === "IPv4" && !a.internal))
+    .map((a) => a.address);
+}
+
 async function startServer() {
   if (!PRODUCTION) {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        // Derived from PORT so a second copy on another port does not collide.
-        hmr: { port: PORT + 21678 },
+        hmr: {
+          // Derived from PORT so a second copy on another port does not collide.
+          port: PORT + 21678,
+          // Live reload listens where the app does. With LAN access on it is
+          // left to follow the page's own address, so other devices reach it.
+          ...(LAN ? {} : { host: "127.0.0.1" }),
+        },
       },
       appType: "spa",
     });
@@ -74,18 +147,45 @@ async function startServer() {
     app.get("*", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
   }
 
-  const server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Leen Kurdish Studio ${APP_VERSION} running at http://localhost:${PORT}`);
-  });
-
-  server.on("error", (err: NodeJS.ErrnoException) => {
-    if (err.code === "EADDRINUSE") {
+  const [primary, ...extra] = LISTEN_HOSTS;
+  try {
+    await listenOn(primary);
+  } catch (err: any) {
+    if (err?.code === "EADDRINUSE") {
       console.error(`\nPort ${PORT} is already in use — the app is probably already running.`);
       console.error(`Open http://localhost:${PORT}, or start this copy elsewhere: PORT=${PORT + 1} npm run dev\n`);
-      process.exit(1);
+    } else {
+      console.error(`\nCould not start the server on ${primary}:${PORT}: ${err?.message || err}\n`);
     }
-    throw err;
-  });
+    process.exit(1);
+  }
+
+  let url = `http://localhost:${PORT}`;
+  for (const host of extra) {
+    try {
+      await listenOn(host);
+    } catch (err: any) {
+      // No IPv6 on this computer: 127.0.0.1 is all "localhost" can mean here.
+      if (["EADDRNOTAVAIL", "EAFNOSUPPORT", "EINVAL"].includes(err?.code)) continue;
+      // Something else has the port on ::1, and "localhost" may reach it instead of the app.
+      url = `http://127.0.0.1:${PORT}`;
+      console.warn(`Another program is using port ${PORT} on ${host} (${err?.code || err}); open ${url} instead of localhost.`);
+    }
+  }
+
+  started = true;
+  console.log(`Leen Kurdish Studio ${APP_VERSION} running at ${url}`);
+  if (LAN) {
+    const where = lanAddresses().map((ip) => `http://${ip}:${PORT}`);
+    console.warn(
+      `\nLAN access is ON (HOST=${HOST_SETTING}). Other devices on this network can open the app` +
+        (where.length ? ` at ${where.join(" or ")}` : "") +
+        ` and use your Gemini key from .env.\nRemove HOST from the environment or .env to keep it to this computer.\n`
+    );
+  }
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error("The app could not start:", err);
+  process.exit(1);
+});

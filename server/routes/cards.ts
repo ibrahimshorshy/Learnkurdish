@@ -23,7 +23,8 @@ import {
 } from "../../src/config/prompts/cards";
 import { VOICE_FALLBACK_CHAIN, safeVoiceModel, safeVoiceName } from "../../src/config/voices";
 import { buildTtsRequest } from "../../src/config/ttsRequest";
-import { errorText, isCredentialProblem, parseJson, runWithFallback, sleep, usageOf, type FallbackResult } from "../gemini";
+import { errorText, isCredentialProblem, parseJson, runWithFallback, usageOf, type FallbackResult } from "../gemini";
+import { abortOnClose } from "../ffmpeg";
 
 /** Longest card text the voice is asked to read. A card is a sentence, not a paragraph. */
 const TTS_MAX_CHARS = 600;
@@ -45,6 +46,40 @@ function isRateLimited(err: unknown): boolean {
   );
 }
 
+/**
+ * The key typed into the app, if it is one. Only a short string is passed on:
+ * anything else would fail inside the SDK with an unhelpful error.
+ */
+function userKeyOf(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const key = value.trim();
+  return key && key.length <= 200 ? key : undefined;
+}
+
+/**
+ * A text model id as the app sends it ("gemini-3.8-flash", or with "models/"
+ * in front). It becomes part of the request URL, so nothing with slashes or
+ * odd characters gets through; anything else means the default.
+ */
+function textModelOf(value: unknown): string {
+  const id = String(value ?? "").trim();
+  return /^(models\/)?[A-Za-z0-9][\w.-]{0,79}$/.test(id) ? id : DEFAULT_TRANSLATE_MODEL;
+}
+
+/** Waits `ms`, or less if the request goes away meanwhile. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+    signal.addEventListener("abort", done);
+  });
+}
+
 function stringMap(value: unknown, keys: string[], limit: number): Record<string, string> {
   const out: Record<string, string> = {};
   if (!value || typeof value !== "object") return out;
@@ -61,10 +96,11 @@ export function registerCardRoutes(app: Express) {
   app.post("/api/cards/write", async (req, res): Promise<any> => {
     try {
       const which: CardWhich = req.body?.which === "outro" ? "outro" : "intro";
-      const requested: unknown[] = Array.isArray(req.body?.audiences) ? req.body.audiences : [];
-      const audiences = requested
-        .map((id) => findAudienceLanguage(String(id)))
-        .filter((a): a is AudienceLanguage => Boolean(a));
+      const requested: unknown[] = Array.isArray(req.body?.audiences) ? req.body.audiences.slice(0, 20) : [];
+      // Each language once: a repeated id would ask the AI for the same field twice.
+      const audiences = [...new Set(requested.map((id) => findAudienceLanguage(String(id))))].filter(
+        (a): a is AudienceLanguage => Boolean(a)
+      );
       if (!audiences.length) return res.status(400).json({ error: "Pick at least one language for the card." });
       const ids = audiences.map((a) => a.id);
 
@@ -76,16 +112,16 @@ export function registerCardRoutes(app: Express) {
         }))
         .filter((l: { kurdish: string }) => l.kurdish.trim());
 
-      const preferredModel = String(req.body?.model || DEFAULT_TRANSLATE_MODEL);
+      const preferredModel = textModelOf(req.body?.model);
       const languageProps: Record<string, any> = {};
       for (const id of ids) languageProps[id] = { type: Type.STRING };
 
-      const result = await runWithFallback(req.body?.userApiKey, preferredModel, TRANSLATE_FALLBACK_CHAIN, (client, model) =>
+      const result = await runWithFallback(userKeyOf(req.body?.userApiKey), preferredModel, TRANSLATE_FALLBACK_CHAIN, (client, model) =>
         client.models.generateContent({
           model,
           contents: cardWritePrompt({
             which,
-            kind: String(req.body?.kind || "lesson"),
+            kind: String(req.body?.kind || "lesson").slice(0, 40),
             language: findTaughtLanguage(String(req.body?.taughtLang || "")),
             audiences,
             titles: stringMap(req.body?.titles, ids, 200),
@@ -119,6 +155,8 @@ export function registerCardRoutes(app: Express) {
   /* ---------- tts: one card's words, spoken ---------- */
 
   app.post("/api/tts", async (req, res): Promise<any> => {
+    // The app cancels a voice it no longer needs; the waiting and retrying stop with it.
+    const signal = abortOnClose(res);
     try {
       const spoken = String(req.body?.text ?? "").trim();
       if (!spoken) return res.status(400).json({ error: "There is no text to read." });
@@ -127,7 +165,7 @@ export function registerCardRoutes(app: Express) {
       }
       const voiceName = safeVoiceName(req.body?.voiceName);
       const preferredModel = safeVoiceModel(req.body?.model);
-      const userApiKey = req.body?.userApiKey;
+      const userApiKey = userKeyOf(req.body?.userApiKey);
 
       console.log(`TTS: voice=[${voiceName}] chars=[${spoken.length}] — words only, no direction`);
 
@@ -157,8 +195,13 @@ export function registerCardRoutes(app: Express) {
           if (attempt === RATE_LIMIT_WAITS_MS.length) break;
           const waitMs = RATE_LIMIT_WAITS_MS[attempt];
           console.log(`TTS rate limited on ${preferredModel}; waiting ${waitMs / 1000}s rather than switching voice model.`);
-          await sleep(waitMs);
+          await pause(waitMs, signal);
+          if (signal.aborted) break;
         }
+      }
+      if (signal.aborted) {
+        console.log("TTS stopped: the app no longer wanted it.");
+        return;
       }
 
       // Still nothing: another model's voice is better than no audio at all.
@@ -193,6 +236,7 @@ export function registerCardRoutes(app: Express) {
       });
     } catch (error: any) {
       console.error("TTS error:", error);
+      if (signal.aborted) return;
       return res.status(500).json({ error: errorText(error) || "Could not make the voice." });
     }
   });

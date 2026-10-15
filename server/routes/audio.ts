@@ -1,9 +1,16 @@
 /**
  * Audio clean-up: noise removal, tone and room presets, run through ffmpeg.
  *
- *   POST /api/audio/process   multipart: audio (any file ffmpeg reads),
- *                             preset (config/audioPresets id), room (1/0)
+ *   POST /api/audio/process   multipart: audio (16-bit PCM WAV, as the
+ *                             browser encodes it), preset (config/audioPresets
+ *                             id), room (1/0)
  *                             → WAV, 48kHz mono 16-bit, the same length
+ *
+ * Only WAV is taken, and ffmpeg is told so (-f wav). Left to guess the format
+ * from the content, ffmpeg would follow a DASH manifest or a playlist to other
+ * files on this computer and to URLs, and a few kilobytes of a compressed
+ * format could decode to hours of audio. The header is checked here first, so
+ * the length of the work is known before any of it starts.
  *
  * The line times index into this audio, so the one thing this must never do
  * is move the voice in time or change the length. Three safeguards:
@@ -24,18 +31,37 @@
  * the result again anyway.
  */
 
-import type { Express } from "express";
+import type { Express, NextFunction, Request, Response } from "express";
 import multer from "multer";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { FFMPEG_MISSING, ffmpeg, hasFfmpeg } from "../ffmpeg";
+import { FFMPEG_MISSING, ToolAborted, abortOnClose, ffmpeg, hasFfmpeg, isAborted } from "../ffmpeg";
+import { errorResponse, withoutPaths } from "../security";
 import { isAudioPresetId, presetGraph } from "../../src/config/audioPresets";
 import type { AudioPresetId } from "../../src/types";
 
 export const PROCESS_RATE = 48000;
 
-const audioUpload = multer({ dest: os.tmpdir(), limits: { fileSize: 1024 * 1024 * 1024 } });
+/**
+ * Longest recording that is cleaned up. Video projects can run long, so well
+ * past three hours; beyond this the browser struggles with the recording
+ * anyway, and the teacher can still use it as recorded (Raw).
+ */
+export const MAX_AUDIO_SECONDS = 4 * 60 * 60;
+
+/**
+ * A WAV's sizes are 32-bit, so no WAV is larger than this. The duration in the
+ * header is the real limit; this only stops a body that is not a WAV at all
+ * from filling the disk.
+ */
+const MAX_UPLOAD_BYTES = 0xffffffff + 8;
+
+const audioUpload = multer({
+  dest: os.tmpdir(),
+  // One file and two short fields (preset, room) are all the app sends.
+  limits: { files: 1, fileSize: MAX_UPLOAD_BYTES, fields: 8, fieldSize: 1024, parts: 10 },
+});
 
 /* ------------------------------------------------------------------ */
 /* WAV in and out                                                       */
@@ -90,10 +116,10 @@ export function readWav(buffer: Buffer): WavData {
   throw new Error("WAV has no data chunk.");
 }
 
-/** 16-bit PCM mono WAV. */
-export function writeWav16(samples: Float32Array, sampleRate: number): Buffer {
-  const dataSize = samples.length * 2;
-  const out = Buffer.alloc(44 + dataSize);
+/** The 44-byte header of a 16-bit PCM mono WAV of `samples` samples. */
+function wav16Header(samples: number, sampleRate: number): Buffer {
+  const dataSize = samples * 2;
+  const out = Buffer.alloc(44);
   out.write("RIFF", 0, "ascii");
   out.writeUInt32LE(36 + dataSize, 4);
   out.write("WAVE", 8, "ascii");
@@ -107,6 +133,13 @@ export function writeWav16(samples: Float32Array, sampleRate: number): Buffer {
   out.writeUInt16LE(16, 34);
   out.write("data", 36, "ascii");
   out.writeUInt32LE(dataSize, 40);
+  return out;
+}
+
+/** 16-bit PCM mono WAV. */
+export function writeWav16(samples: Float32Array, sampleRate: number): Buffer {
+  const out = Buffer.alloc(44 + samples.length * 2);
+  wav16Header(samples.length, sampleRate).copy(out, 0);
   for (let i = 0; i < samples.length; i++) {
     const s = Math.max(-1, Math.min(1, samples[i]));
     out.writeInt16LE(Math.round(s < 0 ? s * 0x8000 : s * 0x7fff), 44 + i * 2);
@@ -234,6 +267,8 @@ export function chainLatency(graph: string): Promise<number> {
         await ffmpeg([
           "-nostdin",
           "-y",
+          "-f",
+          "wav",
           "-i",
           inPath,
           "-af",
@@ -260,12 +295,126 @@ export function chainLatency(graph: string): Promise<number> {
 }
 
 /* ------------------------------------------------------------------ */
+/* The upload                                                           */
+/* ------------------------------------------------------------------ */
+
+/** A refusal of the upload itself, with the status to answer it with. */
+export class AudioInputError extends Error {
+  constructor(message: string, readonly status = 400) {
+    super(message);
+    this.name = "AudioInputError";
+  }
+}
+
+export interface WavInfo {
+  sampleRate: number;
+  channels: number;
+  /** Sample frames in the data, counted the way ffmpeg will read them. */
+  frames: number;
+  seconds: number;
+}
+
+function hoursAndMinutes(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return h ? `${h}h ${String(m).padStart(2, "0")}m` : `${m} minutes`;
+}
+
+/**
+ * Checks the uploaded WAV's header without loading the file: 16-bit PCM, mono
+ * or stereo, a real sample rate, and no longer than MAX_AUDIO_SECONDS. What
+ * passes is exactly what the browser sends; anything else never reaches ffmpeg.
+ */
+export async function inspectWav(filePath: string): Promise<WavInfo> {
+  const handle = await fs.promises.open(filePath, "r");
+  try {
+    const fileSize = (await handle.stat()).size;
+    const read = async (position: number, length: number) => {
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, position);
+      return buffer.subarray(0, bytesRead);
+    };
+
+    const riff = await read(0, 12);
+    if (riff.length < 12 || riff.toString("ascii", 0, 4) !== "RIFF" || riff.toString("ascii", 8, 12) !== "WAVE") {
+      throw new AudioInputError("Clean-up takes the WAV audio the app sends, and this file is not one.", 415);
+    }
+
+    let fmt: { format: number; channels: number; sampleRate: number; blockAlign: number; bits: number } | null = null;
+    let offset = 12;
+    // The app writes fmt and then data; a few other chunks before them are fine.
+    for (let chunk = 0; chunk < 32 && offset + 8 <= fileSize; chunk++) {
+      const header = await read(offset, 8);
+      const id = header.toString("ascii", 0, 4);
+      const size = header.readUInt32LE(4);
+      const body = offset + 8;
+      if (id === "fmt ") {
+        const f = await read(body, Math.min(size, 40));
+        if (size < 16 || f.length < 16) throw new AudioInputError("The WAV's format chunk is damaged.", 415);
+        let format = f.readUInt16LE(0);
+        // WAVE_FORMAT_EXTENSIBLE keeps the real format in its sub-format GUID.
+        if (format === 0xfffe && f.length >= 26) format = f.readUInt16LE(24);
+        fmt = {
+          format,
+          channels: f.readUInt16LE(2),
+          sampleRate: f.readUInt32LE(4),
+          blockAlign: f.readUInt16LE(12),
+          bits: f.readUInt16LE(14),
+        };
+      } else if (id === "data") {
+        if (!fmt) throw new AudioInputError("The WAV has no format chunk before its audio.", 415);
+        const { format, channels, sampleRate, blockAlign, bits } = fmt;
+        if (
+          format !== 1 ||
+          bits !== 16 ||
+          channels < 1 ||
+          channels > 2 ||
+          blockAlign !== channels * 2 ||
+          sampleRate < 8000 ||
+          sampleRate > 192000
+        ) {
+          throw new AudioInputError(
+            `Clean-up takes 16-bit PCM WAV (mono or stereo, 8–192kHz). This one is format ${format}, ` +
+              `${bits}-bit, ${channels} channel(s) at ${sampleRate}Hz.`,
+            415
+          );
+        }
+        // Counted as ffmpeg reads it: a streamed WAV says 0 or 0xFFFFFFFF and
+        // the rest of the file is audio; a cut-off one has only what is there.
+        const available = Math.max(0, fileSize - body);
+        const bytes = size === 0 || size === 0xffffffff ? available : Math.min(size, available);
+        const frames = Math.floor(bytes / blockAlign);
+        if (!frames) throw new AudioInputError("The audio is empty.");
+        const seconds = frames / sampleRate;
+        if (seconds > MAX_AUDIO_SECONDS) {
+          throw new AudioInputError(
+            `This recording is ${hoursAndMinutes(seconds)} long. Clean-up works on up to ${hoursAndMinutes(MAX_AUDIO_SECONDS)}; ` +
+              `choose Raw to use it as recorded.`,
+            413
+          );
+        }
+        return { sampleRate, channels, frames, seconds };
+      }
+      offset = body + size + (size & 1);
+    }
+    throw new AudioInputError("The WAV has no audio in it.", 415);
+  } finally {
+    await handle.close();
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Processing                                                           */
 /* ------------------------------------------------------------------ */
 
-/** The whole -af graph: the preset, with its delay taken out and the length pinned. */
+/**
+ * The whole -af graph: into the working format, the preset with its delay
+ * taken out, and the length pinned.
+ */
 export function timingSafeGraph(graph: string, latency: number, totalSamples: number): string {
-  const parts = ["aformat=sample_fmts=fltp:channel_layouts=mono"];
+  // 48kHz mono float first, in one resampler (the same one -ar would add), so
+  // every sample count after it is at 48kHz.
+  const parts = [`aresample=${PROCESS_RATE}`, `aformat=sample_fmts=fltp:sample_rates=${PROCESS_RATE}:channel_layouts=mono`];
   if (graph) {
     if (latency > 0) {
       // Room at the end for the samples the chain holds back, then drop the
@@ -279,107 +428,238 @@ export function timingSafeGraph(graph: string, latency: number, totalSamples: nu
   return parts.join(",");
 }
 
+export interface CleanedAudio {
+  /** Raw 32-bit float, 48kHz mono, exactly `samples` long. */
+  floatPath: string;
+  samples: number;
+  latency: number;
+  /** Applied on the way to 16-bit: below 1 only when the loudest sample would clip. */
+  scale: number;
+}
+
 export interface ProcessResult {
   wav: Buffer;
   samples: number;
   latency: number;
 }
 
+function stopIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) throw new ToolAborted("Audio clean-up");
+}
+
+/** 4MB: a million samples per read, so no stage of a long recording is ever whole in memory. */
+const BLOCK_BYTES = 4 * 1024 * 1024;
+
+/** A raw float file, a block at a time. Each block is only valid until the next is asked for. */
+async function* floatBlocks(floatPath: string, signal?: AbortSignal): AsyncGenerator<DataView> {
+  const handle = await fs.promises.open(floatPath, "r");
+  try {
+    const buffer = Buffer.alloc(BLOCK_BYTES);
+    let position = 0;
+    for (;;) {
+      stopIfAborted(signal);
+      let filled = 0;
+      while (filled < BLOCK_BYTES) {
+        const { bytesRead } = await handle.read(buffer, filled, BLOCK_BYTES - filled, position + filled);
+        if (!bytesRead) break;
+        filled += bytesRead;
+      }
+      position += filled;
+      const whole = filled - (filled % 4);
+      if (whole) yield new DataView(buffer.buffer, buffer.byteOffset, whole);
+      if (filled < BLOCK_BYTES) return;
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
 /**
- * Cleans one file: any audio ffmpeg can read in, 48kHz mono 16-bit WAV out,
- * sample for sample as long as the input.
+ * Cleans one recording that inspectWav has passed, in a single ffmpeg pass
+ * straight from the upload, into a raw float file of exactly the right
+ * length. Stops (rejecting with ToolAborted) as soon as `signal` fires.
  */
-export async function processAudioFile(
+export async function cleanAudio(
   inputPath: string,
+  info: WavInfo,
   preset: AudioPresetId,
   room: boolean,
-  workDir: string
-): Promise<ProcessResult> {
-  // 1. Decode whatever came in to the working format, so the sample count is known.
-  const stagePath = path.join(workDir, "stage.wav");
-  await ffmpeg([
-    "-nostdin",
-    "-y",
-    "-i",
-    inputPath,
-    "-vn",
-    "-ac",
-    "1",
-    "-ar",
-    String(PROCESS_RATE),
-    "-c:a",
-    "pcm_f32le",
-    stagePath,
-  ]);
-  const stage = readWav(fs.readFileSync(stagePath));
-  const total = stage.samples.length;
-  if (!total) throw new Error("The audio is empty.");
-
-  // 2. The preset, timing-safe.
+  workDir: string,
+  signal?: AbortSignal
+): Promise<CleanedAudio> {
+  // The length the result must have: the recording's own, at 48kHz.
+  const total = Math.round((info.frames * PROCESS_RATE) / info.sampleRate);
   const graph = presetGraph(preset, room);
-  let processed = stage.samples;
-  let latency = 0;
-  if (graph) {
-    latency = await chainLatency(graph);
-    const outPath = path.join(workDir, "out.wav");
-    await ffmpeg([
+  const latency = graph ? await chainLatency(graph) : 0;
+  stopIfAborted(signal);
+
+  const floatPath = path.join(workDir, "out.f32");
+  await ffmpeg(
+    [
       "-nostdin",
       "-y",
+      // WAV and plain PCM only, whatever the bytes look like (see the top of this file).
+      "-f",
+      "wav",
+      "-c:a",
+      "pcm_s16le",
+      // inspectWav has already refused anything longer; this is a second fence.
+      "-t",
+      String(MAX_AUDIO_SECONDS + 1),
       "-i",
-      stagePath,
+      inputPath,
+      "-map",
+      "0:a:0",
       "-af",
       timingSafeGraph(graph, latency, total),
       "-ac",
       "1",
       "-ar",
       String(PROCESS_RATE),
+      // Float out, so nothing clips before the peak check below.
       "-c:a",
       "pcm_f32le",
-      outPath,
-    ]);
-    processed = readWav(fs.readFileSync(outPath)).samples;
+      "-f",
+      "f32le",
+      floatPath,
+    ],
+    { signal }
+  );
+
+  // Checked here, before anything is sent: wrong length is an error.
+  const bytes = (await fs.promises.stat(floatPath)).size;
+  if (bytes !== total * 4) {
+    throw new Error(`Clean-up changed the length (${Math.floor(bytes / 4)} samples instead of ${total}).`);
   }
 
-  // 3. Check, then keep the peaks inside 16-bit.
-  if (processed.length !== total) {
-    throw new Error(`Clean-up changed the length (${processed.length} samples instead of ${total}).`);
-  }
   let peak = 0;
-  for (let i = 0; i < processed.length; i++) {
-    const a = Math.abs(processed[i]);
-    if (a > peak) peak = a;
+  for await (const block of floatBlocks(floatPath, signal)) {
+    for (let i = 0; i < block.byteLength; i += 4) {
+      const a = Math.abs(block.getFloat32(i, true));
+      if (a > peak) peak = a;
+    }
   }
-  if (peak > 0.98) {
-    const scale = 0.98 / peak;
-    for (let i = 0; i < processed.length; i++) processed[i] *= scale;
+  stopIfAborted(signal);
+  // Keep the peaks inside 16-bit.
+  return { floatPath, samples: total, latency, scale: peak > 0.98 ? 0.98 / peak : 1 };
+}
+
+/** The cleaned audio as a 16-bit WAV, header first, then a block at a time. */
+export async function* wav16Chunks(cleaned: CleanedAudio, signal?: AbortSignal): AsyncGenerator<Buffer> {
+  yield wav16Header(cleaned.samples, PROCESS_RATE);
+  for await (const block of floatBlocks(cleaned.floatPath, signal)) {
+    const count = block.byteLength / 4;
+    const out = Buffer.allocUnsafe(count * 2);
+    const view = new DataView(out.buffer, out.byteOffset, out.length);
+    for (let i = 0; i < count; i++) {
+      const s = Math.max(-1, Math.min(1, block.getFloat32(i * 4, true) * cleaned.scale));
+      view.setInt16(i * 2, Math.round(s < 0 ? s * 0x8000 : s * 0x7fff), true);
+    }
+    yield out;
   }
-  return { wav: writeWav16(processed, PROCESS_RATE), samples: total, latency };
+}
+
+/**
+ * Cleans one WAV file into a WAV in memory: 48kHz mono 16-bit, sample for
+ * sample as long as the input. For the tests and short audio; the route
+ * streams the same chunks instead of holding them.
+ */
+export async function processAudioFile(
+  inputPath: string,
+  preset: AudioPresetId,
+  room: boolean,
+  workDir: string,
+  signal?: AbortSignal
+): Promise<ProcessResult> {
+  const info = await inspectWav(inputPath);
+  const cleaned = await cleanAudio(inputPath, info, preset, room, workDir, signal);
+  const parts: Buffer[] = [];
+  for await (const chunk of wav16Chunks(cleaned, signal)) parts.push(chunk);
+  return { wav: Buffer.concat(parts), samples: cleaned.samples, latency: cleaned.latency };
+}
+
+/* ------------------------------------------------------------------ */
+/* The route                                                            */
+/* ------------------------------------------------------------------ */
+
+/** The upload, with its limits answered here as JSON the app can show. */
+function receiveAudio(req: Request, res: Response, next: NextFunction) {
+  audioUpload.single("audio")(req, res, (err?: any) => {
+    if (!err) return next();
+    if (res.headersSent || res.destroyed) return;
+    const { status, error } = errorResponse(err);
+    return res
+      .status(status)
+      .json({ error: err?.code === "LIMIT_FILE_SIZE" ? "The recording is too large to clean up." : error });
+  });
+}
+
+/** Resolves once `res` can take more, or the request has gone. */
+function drained(res: Response, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const done = () => {
+      res.off("drain", done);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    res.on("drain", done);
+    signal.addEventListener("abort", done);
+  });
 }
 
 export function registerAudioRoutes(app: Express) {
-  app.post("/api/audio/process", audioUpload.single("audio"), async (req, res): Promise<any> => {
+  app.post("/api/audio/process", receiveAudio, async (req, res): Promise<any> => {
     const uploaded = req.file?.path;
+    // The app drops its request when the preset changes; the work for it stops with it.
+    const signal = abortOnClose(res);
     let workDir: string | null = null;
     try {
       if (!uploaded) return res.status(400).json({ error: "No audio was sent." });
       if (!(await hasFfmpeg())) return res.status(503).json({ error: FFMPEG_MISSING });
 
       const preset = String(req.body?.preset || "clean");
-      if (!isAudioPresetId(preset)) return res.status(400).json({ error: `Unknown clean-up preset “${preset}”.` });
+      if (!isAudioPresetId(preset)) return res.status(400).json({ error: `Unknown clean-up preset “${preset.slice(0, 40)}”.` });
       const room = ["1", "true", "on", "yes"].includes(String(req.body?.room || "").toLowerCase());
 
+      const info = await inspectWav(uploaded);
+      stopIfAborted(signal);
       workDir = fs.mkdtempSync(path.join(os.tmpdir(), "leen-ku-audio-"));
       const started = Date.now();
-      const result = await processAudioFile(uploaded, preset, room, workDir);
+      const cleaned = await cleanAudio(uploaded, info, preset, room, workDir, signal);
       console.log(
-        `Audio clean-up: ${preset}${room ? " + room" : ""}, ${(result.samples / PROCESS_RATE).toFixed(1)}s, ` +
-          `latency ${result.latency} samples corrected, ${Date.now() - started}ms`
+        `Audio clean-up: ${preset}${room ? " + room" : ""}, ${(cleaned.samples / PROCESS_RATE).toFixed(1)}s, ` +
+          `latency ${cleaned.latency} samples corrected, ${Date.now() - started}ms`
       );
+
+      res.status(200);
       res.setHeader("Content-Type", "audio/wav");
-      res.setHeader("X-Audio-Samples", String(result.samples));
+      res.setHeader("Content-Length", String(44 + cleaned.samples * 2));
+      res.setHeader("X-Audio-Samples", String(cleaned.samples));
       res.setHeader("X-Audio-Rate", String(PROCESS_RATE));
-      return res.send(result.wav);
+      // Streamed: a long recording is never whole in memory here.
+      for await (const chunk of wav16Chunks(cleaned, signal)) {
+        if (!res.write(chunk)) await drained(res, signal);
+        if (signal.aborted) break;
+      }
+      stopIfAborted(signal);
+      res.end();
     } catch (err: any) {
+      if (signal.aborted || isAborted(err)) {
+        // Nothing more is sent: nobody is listening.
+        console.log("Audio clean-up stopped: the app no longer wanted it.");
+        return;
+      }
+      if (res.headersSent) {
+        // Half sent: all that can be done is cut it off, and the app will see a short file.
+        console.error("Audio clean-up failed while sending:", err?.message || err);
+        res.destroy();
+        return;
+      }
+      if (err instanceof AudioInputError) {
+        console.warn(`Audio clean-up refused: ${err.message}`);
+        return res.status(err.status).json({ error: err.message });
+      }
       const detail = String(err?.stderr || err?.message || err)
         .trim()
         .split("\n")
@@ -390,8 +670,7 @@ export function registerAudioRoutes(app: Express) {
         return res.status(400).json({ error: "This file could not be read as audio, so it was not cleaned up." });
       }
       // ffmpeg's own words, minus the temporary file paths that mean nothing to anyone.
-      const said = detail.replace(new RegExp(`${os.tmpdir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^\\s:]*`, "g"), "the file");
-      return res.status(500).json({ error: `Could not clean up the audio. ${said}`.trim() });
+      return res.status(500).json({ error: `Could not clean up the audio. ${withoutPaths(detail)}`.trim() });
     } finally {
       if (uploaded) fs.rmSync(uploaded, { force: true });
       if (workDir) fs.rmSync(workDir, { recursive: true, force: true });

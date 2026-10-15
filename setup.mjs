@@ -197,10 +197,16 @@ function portTaken(port) {
   });
 }
 
-/** Whether the thing on that port is us, rather than some unrelated program. */
+/**
+ * Whether the thing on that port is us, rather than some unrelated program.
+ * Asked at 127.0.0.1, the address portTaken probed and the server always
+ * listens on: Node may resolve "localhost" to ::1 first, which a computer
+ * without IPv6 does not have. (The browser still opens localhost, because it
+ * keeps the projects per address.)
+ */
 async function isOurApp(port) {
   try {
-    const res = await fetch(`http://localhost:${port}/api/health`, {
+    const res = await fetch(`http://127.0.0.1:${port}/api/health`, {
       signal: AbortSignal.timeout(1500),
     });
     if (!res.ok) return false;
@@ -250,8 +256,16 @@ const server = spawn("npx", ["tsx", "server.ts"], {
   env: { ...process.env, PORT: String(port) },
 });
 
-// Give the server a moment to bind before opening a tab at it.
-setTimeout(() => openBrowser(url), 2500);
+// Open the tab once the server answers, rather than after a guess: starting
+// Vite can take a while on a slow laptop, and a tab opened too early shows
+// "connection refused". After a minute, open it anyway.
+(async () => {
+  const until = Date.now() + 60_000;
+  while (Date.now() < until && !(await isOurApp(port))) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  openBrowser(url);
+})();
 
 server.on("exit", (code) => process.exit(code ?? 0));
 for (const sig of ["SIGINT", "SIGTERM"]) {

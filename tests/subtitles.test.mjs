@@ -126,13 +126,14 @@ check(
 {
   const base = { fit: "blur", source: { width: 1920, height: 1080 }, width: 1080, height: 1920 };
   const full = subtitleGraph({ ...base, cues: { x: 0, y: 1400 }, overlay: { x: 440, y: 150 } });
-  check("subtitles are laid over the framed video", full.includes("[base][1:v]overlay=0:1400"), full);
-  check("the subtitle overlay ends with the video", /\[1:v\]overlay=[^;]*shortest=1/.test(full), full);
-  check("the logo is the next input, over the subtitles", full.includes("[subs][2:v]overlay=440:150"), full);
-  check("the logo overlay does not end the video", !/\[2:v\]overlay=[^;]*shortest/.test(full), full);
+  // Each PNG input is converted to YUV with the BT.709 matrix before it is laid over.
+  check("subtitles are laid over the framed video", full.includes("[1:v]scale=out_color_matrix=bt709") && full.includes("[base][cueimg]overlay=0:1400"), full);
+  check("the subtitle overlay ends with the video", /\[cueimg\]overlay=[^;]*shortest=1/.test(full), full);
+  check("the logo is the next input, over the subtitles", full.includes("[2:v]scale=out_color_matrix=bt709") && full.includes("[subs][logoimg]overlay=440:150"), full);
+  check("the logo overlay does not end the video", !/\[logoimg\]overlay=[^;]*shortest/.test(full), full);
   check("the graph ends in [vout] as yuv420p", full.endsWith("format=yuv420p[vout]"), full);
   const logoOnly = subtitleGraph({ ...base, cues: null, overlay: { x: 2, y: 4 } });
-  check("with no cues the logo is input 1", logoOnly.includes("[base][1:v]overlay=2:4") && !logoOnly.includes("[subs]"), logoOnly);
+  check("with no cues the logo is input 1", logoOnly.includes("[1:v]scale=") && logoOnly.includes("[base][logoimg]overlay=2:4") && !logoOnly.includes("[subs]"), logoOnly);
   const bare = subtitleGraph({ ...base, cues: null, overlay: null });
   check("with neither, just the frame", bare.endsWith("[base]format=yuv420p[vout]"), bare);
 }
