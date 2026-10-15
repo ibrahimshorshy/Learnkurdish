@@ -193,6 +193,7 @@ export default function TranscriptStep({
 
         {raw && (
           <WaveformEditor
+            playback={playback}
             mono={raw.mono}
             duration={duration}
             lines={lines}
@@ -216,7 +217,13 @@ export default function TranscriptStep({
         )}
       </section>
 
-      <AudioCleanupPanel project={project} audio={audio} playback={playback} update={update} />
+      <AudioCleanupPanel
+        project={project}
+        audio={audio}
+        playback={playback}
+        update={update}
+        selectedLineId={selectedId}
+      />
 
       {isDialogue && (
         <section className="card p-5 space-y-3">

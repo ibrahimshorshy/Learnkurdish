@@ -162,6 +162,12 @@ check("limit: never turns louder into quieter", softLimit(0.9) < softLimit(0.95)
   check("take: air is clamped to the take", edge.start === 0 && edge.end === 2);
   const word = speechRange({ duration: 3, segments: [{ start: 0.2, end: 0.3 }, { start: 0.45, end: 1.2 }] }, 3);
   check("take: a short real word near the speech is kept", near(word.start, 0.2 - TAKE_LEAD, 1e-9), `${word.start}`);
+  const blips = speechRange({ duration: 4, segments: [{ start: 0.5, end: 0.56 }, { start: 1.5, end: 1.56 }, { start: 2.5, end: 2.56 }] }, 4);
+  check(
+    "take: nothing but short sounds is kept whole, not whittled down to one",
+    near(blips.start, 0.5 - TAKE_LEAD, 1e-9) && near(blips.end, 2.56 + TAKE_TAIL, 1e-9),
+    `${blips.start} ${blips.end}`
+  );
 
   const take = { id: "t", start: 0.5, end: 2, durationSeconds: 3 };
   check("nudge: start earlier", near(nudgeTake(take, "start", -0.05).start, 0.45, 1e-9));

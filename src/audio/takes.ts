@@ -43,7 +43,13 @@ export function speechRange(
   if (!segments.length || (segments.length === 1 && segments[0].start <= 0 && segments[0].end >= duration - 0.011)) {
     return { start: 0, end: duration };
   }
-  // Drop isolated blips at either end.
+  // Drop isolated blips at either end — but only when there is real speech
+  // to keep. A take made of nothing but short sounds (clipped syllables, a
+  // quiet microphone) is kept whole rather than whittled down to one blip.
+  const isBlip = (s: TimeRange) => s.end - s.start < BLIP;
+  if (!segments.some((s) => !isBlip(s))) {
+    return padded(segments[0].start, segments[segments.length - 1].end, duration, pads);
+  }
   while (segments.length > 1) {
     const [first, second] = segments;
     if (first.end - first.start < BLIP && second.start - first.end > BLIP_ISOLATION) segments = segments.slice(1);
@@ -55,8 +61,13 @@ export function speechRange(
     if (last.end - last.start < BLIP && last.start - before.end > BLIP_ISOLATION) segments = segments.slice(0, -1);
     else break;
   }
-  const start = Math.max(0, segments[0].start - pads.lead);
-  const end = Math.min(duration, segments[segments.length - 1].end + pads.tail);
+  return padded(segments[0].start, segments[segments.length - 1].end, duration, pads);
+}
+
+/** From `first` to `last` with the air added, inside the take; the whole take if that is too short to be a line. */
+function padded(first: number, last: number, duration: number, pads: { lead: number; tail: number }): TimeRange {
+  const start = Math.max(0, first - pads.lead);
+  const end = Math.min(duration, last + pads.tail);
   return end - start >= MIN_TAKE ? { start: round3(start), end: round3(end) } : { start: 0, end: duration };
 }
 

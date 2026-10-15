@@ -30,6 +30,8 @@ interface Props {
   settings: AppSettings;
   ffmpeg: boolean | null;
   logoSrc: string;
+  /** The recording is still being cleaned up in the background. */
+  processing?: boolean;
   update: (patch: Partial<Project> | ((p: Project) => Partial<Project>)) => void;
 }
 
@@ -52,7 +54,7 @@ export function videoFileName(project: Project, languages: string[]): string {
  * The last step for lessons, dialogues and stories: pick the look, preview it
  * with sound, and make one MP4 per chosen output.
  */
-export default function OutputStep({ project, sources, settings, ffmpeg, logoSrc, update }: Props) {
+export default function OutputStep({ project, sources, settings, ffmpeg, logoSrc, processing, update }: Props) {
   const v = project.video;
   const setVideo = (patch: Partial<VideoSettings>) => update((p) => ({ video: { ...p.video, ...patch } }));
 
@@ -349,6 +351,11 @@ export default function OutputStep({ project, sources, settings, ffmpeg, logoSrc
               ffmpeg is not installed, so the MP4 cannot be assembled. Windows: winget install Gyan.FFmpeg · macOS: brew
               install ffmpeg — then restart the app.
             </ErrorNote>
+          )}
+          {processing && (
+            <p className="text-xs text-kurd-sun">
+              Still cleaning up your recording — a video made now uses it as recorded.
+            </p>
           )}
           {missingAudio > 0 && (
             <p className="text-xs text-kurd-sun">

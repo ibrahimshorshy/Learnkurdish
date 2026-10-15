@@ -48,7 +48,6 @@ export default function App() {
   const [busyLineId, setBusyLineId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const audio = useLessonAudio(project);
   const playback = usePlayback();
 
   /* ---------- settings and server status ---------- */
@@ -91,6 +90,10 @@ export default function App() {
   const update = useCallback((patch: Patch) => {
     setProject((p) => (p ? { ...p, ...(typeof patch === "function" ? patch(p) : patch), updatedAt: Date.now() } : p));
   }, []);
+
+  // With `update`, cleaned-up audio is stored in the project, so it survives a
+  // reload and a video made before cleaning finished is flagged as old.
+  const audio = useLessonAudio(project, update);
 
   // Autosave, a moment after the last change. A project with nothing in it yet
   // is not saved, so opening a section does not litter the library.
@@ -382,6 +385,7 @@ export default function App() {
                 <OutputStep
                   project={project}
                   sources={audio.sources}
+                  processing={audio.processing.state === "processing"}
                   settings={settings}
                   ffmpeg={health?.ffmpeg ?? null}
                   logoSrc={logoSrc}

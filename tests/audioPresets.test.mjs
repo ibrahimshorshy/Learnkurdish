@@ -160,6 +160,39 @@ if (ffmpegOk) {
       }
     }
 
+    // The onset check above reads a level threshold, which a compressor can
+    // nudge by a millisecond or two on the attack. Cross-correlation over the
+    // whole signal measures the real shift: it must be well under a millisecond.
+    {
+      const signal = testSignal(PROCESS_RATE, seconds, bursts);
+      const at48 = path.join(dir, "in48.wav");
+      fs.writeFileSync(at48, writeWav16(signal, PROCESS_RATE));
+      const lagOf = (a, b) => {
+        let best = 0;
+        let bestScore = -Infinity;
+        for (let lag = -240; lag <= 240; lag++) {
+          let s = 0;
+          for (let i = 0; i < a.length; i += 2) {
+            const j = i + lag;
+            if (j >= 0 && j < b.length) s += a[i] * b[j];
+          }
+          if (s > bestScore) {
+            bestScore = s;
+            best = lag;
+          }
+        }
+        return best;
+      };
+      for (const preset of AUDIO_PRESETS.filter((p) => p.id !== "raw")) {
+        for (const room of [false, true]) {
+          const work = fs.mkdtempSync(path.join(dir, "w-"));
+          const out = readWav((await processAudioFile(at48, preset.id, room, work)).wav).samples;
+          const lag = lagOf(signal, out);
+          check(`${preset.id}${room ? " + room" : ""}: no shift by cross-correlation (±0.5ms)`, Math.abs(lag) <= 24, `${lag} samples`);
+        }
+      }
+    }
+
     // A loud recording must come back below full scale, not squared off.
     {
       const loud = testSignal(PROCESS_RATE, 1.0, [0.3]).map((v) => Math.max(-1, Math.min(1, v * 2.2)));
