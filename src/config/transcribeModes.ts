@@ -11,7 +11,7 @@
  */
 
 import type { TaughtLanguage } from "./languages";
-import type { RawTranscriptLine } from "../utils/transcript";
+import type { NormalizeOptions, RawTranscriptLine } from "../utils/transcript";
 import { transcribePrompt, transcribeSystemPrompt } from "./prompts";
 import { dialogueMode } from "./prompts/dialogue";
 import { alignedMode } from "./prompts/aligned";
@@ -35,6 +35,12 @@ export interface TranscribeModeSpec {
   schema: (input: TranscribeInput) => any;
   /** The model's parsed JSON → raw lines for normalizeTranscript. */
   toRawLines: (data: any, input: TranscribeInput) => RawTranscriptLine[];
+  /**
+   * How normalizeTranscript treats this mode's lines. A mode whose text and
+   * order come from a known script keeps both; the default cleans the text
+   * the model wrote and sorts the lines by time.
+   */
+  normalize?: NormalizeOptions;
 }
 
 export const linesMode: TranscribeModeSpec = {

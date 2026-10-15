@@ -15,7 +15,9 @@ export interface RecordStepProps {
   /** The main recording as recorded. */
   audio: RecordingAudio | null;
   audioError: string | null;
+  /** The recording is being transcribed. */
   busy: boolean;
+  /** Writes into this project, even when called after another one was opened. */
   update: (patch: Partial<Project> | ((p: Project) => Partial<Project>)) => void;
   onTranscribe: () => void;
 }
@@ -115,8 +117,10 @@ export default function RecordStep({ project, settings, audio, audioError, busy,
         <button
           type="button"
           onClick={live ? stopRecording : startRecording}
-          disabled={saving}
-          className={`relative w-36 h-36 rounded-full flex items-center justify-center transition-all cursor-pointer ${
+          // A new recording while this one is being transcribed would only
+          // throw the transcription away when it lands.
+          disabled={saving || (busy && !live)}
+          className={`relative w-36 h-36 rounded-full flex items-center justify-center transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 ${
             live ? "bg-kurd-red recording-pulse" : "bg-gradient-to-br from-brand-blue to-brand-green hover:scale-105"
           }`}
           aria-label={live ? "Stop recording" : "Start recording"}
@@ -143,7 +147,9 @@ export default function RecordStep({ project, settings, audio, audioError, busy,
               <Loader2 size={16} className="animate-spin" /> Reading the recording…
             </span>
           ) : (
-            <span className="text-sm text-paper/50">{recording ? "Tap to record again" : "Tap to start"}</span>
+            <span className="text-sm text-paper/50">
+              {busy ? "Transcribing — record again once it is done" : recording ? "Tap to record again" : "Tap to start"}
+            </span>
           )}
         </div>
 
@@ -178,7 +184,7 @@ export default function RecordStep({ project, settings, audio, audioError, busy,
               className="hidden"
               onChange={onFile}
             />
-            <button type="button" className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={saving}>
+            <button type="button" className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={saving || busy}>
               <Upload size={16} /> Upload an audio file
             </button>
           </>

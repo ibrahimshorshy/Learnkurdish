@@ -10,6 +10,7 @@ import {
   paragraphsToText,
   storyStats,
   matchLinesToScript,
+  linesToStoryText,
   sentenceKey,
   readStoryFile,
   cleanStoryText,
@@ -142,6 +143,47 @@ check(
 );
 check("no script: every line is stray", matchLinesToScript(["a"], []).strayLines === 1);
 check("cleaned-up line (quotes stripped) still matches", matchLinesToScript(["چۆنی؟"], ["¶ «چۆنی؟»"]).strayLines === 0);
+
+// Lines merged or split on the transcript step.
+const threeSentences = toScript("یەک. دوو. سێ.");
+check(
+  "a line holding two sentences matches both",
+  same(matchLinesToScript(["یەک. دوو.", "سێ."], threeSentences), { strayLines: 0, missingSentences: 0 })
+);
+check(
+  "a sentence split over two lines matches",
+  same(matchLinesToScript(["ڕۆژێک لە ڕۆژان", "کوڕێک هەبوو."], ["¶ ڕۆژێک لە ڕۆژان کوڕێک هەبوو."]), { strayLines: 0, missingSentences: 0 })
+);
+check(
+  "a merge does not hide an edit elsewhere",
+  same(matchLinesToScript(["یەک. دوو.", "چوار."], threeSentences), { strayLines: 1, missingSentences: 1 })
+);
+check(
+  "a merged line with a changed word is stray",
+  same(matchLinesToScript(["یەک. دە.", "سێ."], threeSentences), { strayLines: 1, missingSentences: 2 })
+);
+check(
+  "a merge over a skipped sentence is not a match",
+  matchLinesToScript(["یەک. سێ."], threeSentences).strayLines === 1
+);
+check(
+  "four sentences in one line still match",
+  matchLinesToScript(["a. b. c. d."], toScript("a. b. c. d.")).strayLines === 0
+);
+
+// "Use the sentences as the text": lines → text → script must match the lines.
+const merged = [{ kurdish: "یەک. دوو.", paragraphStart: true }, { kurdish: "سێ." }, { kurdish: "چوار.", paragraphStart: true }];
+const copied = linesToStoryText(merged);
+check("lines to text: one line per line, paragraphs apart", copied === "یەک. دوو.\nسێ.\n\nچوار.", show(copied));
+check(
+  "lines to text: the text matches the lines it came from",
+  same(matchLinesToScript(merged.map((l) => l.kurdish), toScript(copied)), { strayLines: 0, missingSentences: 0 })
+);
+check("lines to text: the paragraphs survive", toScript(copied).filter((l) => l.startsWith(PARAGRAPH_MARK)).length === 2);
+check(
+  "lines to text: empty lines dropped, spacing tidied",
+  linesToStoryText([{ kurdish: "  " }, { kurdish: "a\n  b." }, { kurdish: "c." }]) === "a b.\nc."
+);
 
 /* ---------- files ---------- */
 

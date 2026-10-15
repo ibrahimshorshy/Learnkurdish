@@ -8,7 +8,7 @@ import {
 import { transcribeMode } from "../src/config/transcribeModes.ts";
 import { findTaughtLanguage } from "../src/config/languages.ts";
 import { normalizeTranscript } from "../src/utils/transcript.ts";
-import { toScript } from "../src/utils/storyText.ts";
+import { toScript, matchLinesToScript } from "../src/utils/storyText.ts";
 import { check, near, done } from "./harness.mjs";
 
 const language = findTaughtLanguage("ckb");
@@ -149,5 +149,45 @@ const stringTimes = normalizeTranscript(
   20
 );
 check("normalized: string timestamps read", stringTimes.timesTrusted && near(stringTimes.lines[0].start, 0.5, 1e-9));
+
+/* ---------- the script's text and order are kept (as the server runs it) ---------- */
+
+check("aligned mode keeps the text and the order", alignedMode.normalize?.keepText === true && alignedMode.normalize?.keepOrder === true);
+check("the other modes clean and sort", transcribeMode("lines").normalize === undefined && transcribeMode("dialogue").normalize === undefined);
+
+const serverRun = (data, knownLines, durationSeconds) =>
+  normalizeTranscript(alignedMode.toRawLines(data, { language, durationSeconds, knownLines }), durationSeconds, alignedMode.normalize);
+
+const quoted = ["¶ ئازاد گوتی: «بەیانی دێم.»", "«چۆنی؟»", 'He said "go."', "¶ 1. یەکەم شت.", "2. دووەم شت.", "- بۆ کوێ دەچیت؟"];
+const quotedLines = serverRun(
+  { sentences: quoted.map((_, i) => ({ n: i + 1, heard: true, start: i * 3 + 0.5, end: i * 3 + 2.5 })) },
+  quoted,
+  20
+);
+check(
+  "quotes, list numbers and dashes reach the lines as written",
+  quotedLines.lines.map((l) => l.text).join("|") ===
+    "ئازاد گوتی: «بەیانی دێم.»|«چۆنی؟»|He said \"go.\"|1. یەکەم شت.|2. دووەم شت.|- بۆ کوێ دەچیت؟",
+  JSON.stringify(quotedLines.lines.map((l) => l.text))
+);
+check(
+  "a fresh transcription matches its own text",
+  JSON.stringify(matchLinesToScript(quotedLines.lines.map((l) => l.text), quoted)) === JSON.stringify({ strayLines: 0, missingSentences: 0 })
+);
+
+const crossed = serverRun(
+  {
+    sentences: [
+      { n: 1, heard: true, start: 1, end: 3 },
+      { n: 2, heard: true, start: 5.3, end: 6 },
+      { n: 3, heard: true, start: 5.0, end: 8 },
+    ],
+  },
+  ["¶ یەک.", "¶ دوو.", "سێ."],
+  10
+);
+check("starts that cross a little: the text's order is kept", crossed.lines.map((l) => l.text).join() === "یەک.,دوو.,سێ.");
+check("starts that cross a little: paragraph 2 still starts on sentence 2", crossed.lines[1].paragraphStart === true && !crossed.lines[2].paragraphStart);
+check("starts that cross a little: times still trusted", crossed.timesTrusted);
 
 done("aligned transcription");

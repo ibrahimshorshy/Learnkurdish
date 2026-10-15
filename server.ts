@@ -6,7 +6,7 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { hasFfmpeg } from "./server/ffmpeg";
-import { apiGuard, errorResponse, isLoopbackHost } from "./server/security";
+import { apiGuard, errorResponse, isLoopbackHost, listenHosts } from "./server/security";
 import { registerAiRoutes } from "./server/routes/ai";
 import { registerRenderRoutes } from "./server/routes/render";
 import { registerAudioRoutes } from "./server/routes/audio";
@@ -26,12 +26,11 @@ const PORT = Number(process.env.PORT) || 3100;
 const HOST_SETTING = (process.env.HOST || "").trim();
 const LAN = HOST_SETTING !== "" && !isLoopbackHost(HOST_SETTING);
 /**
- * Both loopbacks: browsers and Node may resolve "localhost" to ::1 first
- * (Windows does), and http://localhost:PORT has to keep working. It also has
- * to stay the address the teacher opens, because the browser keeps the
- * projects per address.
+ * Always including both loopbacks (see listenHosts): http://localhost:PORT has
+ * to keep working, also with LAN access on, because the browser keeps the
+ * projects per address and that is the address the teacher opens.
  */
-const LISTEN_HOSTS = LAN ? [HOST_SETTING] : ["127.0.0.1", "::1"];
+const LISTEN_HOSTS = listenHosts(HOST_SETTING);
 
 /** Read from package.json so it cannot drift from the released version. */
 const APP_VERSION: string = (() => {
@@ -155,7 +154,9 @@ async function startServer() {
       console.error(`\nPort ${PORT} is already in use — the app is probably already running.`);
       console.error(`Open http://localhost:${PORT}, or start this copy elsewhere: PORT=${PORT + 1} npm run dev\n`);
     } else {
-      console.error(`\nCould not start the server on ${primary}:${PORT}: ${err?.message || err}\n`);
+      console.error(`\nCould not start the server on ${primary}:${PORT}: ${err?.message || err}`);
+      if (LAN) console.error(`Check HOST=${HOST_SETTING} (in .env or the environment): it must be an address of this computer.`);
+      console.error("");
     }
     process.exit(1);
   }
@@ -167,9 +168,12 @@ async function startServer() {
     } catch (err: any) {
       // No IPv6 on this computer: 127.0.0.1 is all "localhost" can mean here.
       if (["EADDRNOTAVAIL", "EAFNOSUPPORT", "EINVAL"].includes(err?.code)) continue;
-      // Something else has the port on ::1, and "localhost" may reach it instead of the app.
-      url = `http://127.0.0.1:${PORT}`;
-      console.warn(`Another program is using port ${PORT} on ${host} (${err?.code || err}); open ${url} instead of localhost.`);
+      // Something else has the port there, and "localhost" may reach it instead of the app.
+      if (host === "::1") url = `http://127.0.0.1:${PORT}`;
+      console.warn(
+        `Another program is using port ${PORT} on ${host} (${err?.code || err})` +
+          (host === "::1" ? `; open ${url} instead of localhost.` : ".")
+      );
     }
   }
 

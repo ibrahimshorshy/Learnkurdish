@@ -8,7 +8,10 @@ import {
   pageAlpha,
   sentenceState,
   wordsSpoken,
+  wordDirections,
+  placeLine,
 } from "../src/render/storyLayout.ts";
+import { firstStrongDirection, isRtlText } from "../src/render/textLayout.ts";
 import { buildTimeline, eventAt } from "../src/render/timeline.ts";
 import { check, near, done } from "./harness.mjs";
 
@@ -118,5 +121,94 @@ check("sentence states", sentenceState(1, 2) === "past" && sentenceState(2, 2) =
 check("before anything is read, all future", sentenceState(0, -1) === "future");
 check("words spoken", wordsSpoken([0, 0.5, 1], 0.6) === 2 && wordsSpoken([0, 0.5, 1], -1) === 0 && wordsSpoken([0, 0.5, 1], 5) === 3);
 check("no timings", wordsSpoken(null, 1) === 0);
+
+/* ---------- mixed directions ---------- */
+
+check("first strong: Kurdish", firstStrongDirection("«چۆنی؟»") === "rtl");
+check("first strong: English", firstStrongDirection("(Hello) سڵاو") === "ltr");
+check("first strong: English with a Kurdish word later", firstStrongDirection("The word سڵاو means hello") === "ltr");
+check("first strong: digits and punctuation have none", firstStrongDirection("1997 — ٣.٥!") === null && firstStrongDirection("") === null);
+check("isRtlText is unchanged (any right-to-left letter)", isRtlText("The word سڵاو means hello") === true);
+
+const dirsOf = (text, base, groups) => wordDirections(text.split(" "), base, groups).join(",");
+check("directions: a Latin name in Kurdish", dirsOf("کتێبی J. K. Rowling خوێندەوە.", "rtl") === "rtl,ltr,ltr,ltr,rtl");
+check("directions: a number after a Latin word goes with it", dirsOf("لە New York 1997 دەژیا.", "rtl") === "rtl,ltr,ltr,ltr,rtl");
+check("directions: a number between Kurdish words stays Kurdish", dirsOf("ساڵی 1997 Rowling هات.", "rtl") === "rtl,rtl,ltr,rtl");
+check("directions: Arabic-Indic digits after Latin stay with the Kurdish", dirsOf("Rowling ١٩٩٧ هات.", "rtl") === "ltr,rtl,rtl");
+check("directions: a dash between two Latin words joins them", dirsOf("لە New — York", "rtl") === "rtl,ltr,ltr,ltr");
+check("directions: a Kurdish phrase in English", dirsOf("He said «ئێوە چۆنن» today.", "ltr") === "ltr,ltr,rtl,rtl,ltr");
+check("directions: a number after Kurdish in English goes with it", dirsOf("He said ئێوە 5 today", "ltr") === "ltr,ltr,rtl,rtl,ltr");
+check(
+  "directions: sentences do not lean on each other",
+  wordDirections(["Rowling", "—", "Harry"], "rtl", [0, 1, 1]).join() === "ltr,rtl,ltr"
+);
+
+// placeLine with a pretend font: every character 10 wide, a space 5.
+const measureChars = (t) => [...t].length * 10;
+function laidOut(words, base, groups) {
+  const dirs = wordDirections(words, base, groups);
+  let offset = 0;
+  const boxes = words.map((text, i) => {
+    const width = measureChars(text);
+    const box = base === "rtl"
+      ? { left: 1000 - offset - width, right: 1000 - offset }
+      : { left: offset, right: offset + width };
+    offset += width + 5;
+    return { text, ...box, dir: dirs[i], group: groups?.[i] ?? 0 };
+  });
+  return { boxes, pieces: placeLine(boxes, base, measureChars) };
+}
+const visual = (pieces) => [...pieces].sort((a, b) => a.left - b.left).map((p) => p.text).join(" ");
+
+const rowling = laidOut(["کتێبی", "J.", "K.", "Rowling،", "خوێندەوە."], "rtl");
+check(
+  "a Latin run in Kurdish reads in its own order",
+  visual(rowling.pieces) === "خوێندەوە. ، J. K. Rowling کتێبی",
+  visual(rowling.pieces)
+);
+check(
+  "the run's words are drawn left to right, its trailing comma right to left",
+  rowling.pieces.filter((p) => p.dir === "ltr").map((p) => p.text).join() === "J.,K.,Rowling" &&
+    rowling.pieces.find((p) => p.text === "،").dir === "rtl"
+);
+check("the comma keeps its word's colour", rowling.pieces.find((p) => p.text === "،").word === 3);
+check(
+  "the run keeps exactly the room its words had",
+  (() => {
+    const run = rowling.pieces.filter((p) => p.word >= 1 && p.word <= 3);
+    const left = Math.min(...run.map((p) => p.left));
+    const right = Math.max(...run.map((p) => p.right));
+    return Math.abs(left - rowling.boxes[3].left) < 1e-9 && Math.abs(right - rowling.boxes[1].right) < 1e-9;
+  })()
+);
+check(
+  "pieces never overlap",
+  [...rowling.pieces].sort((a, b) => a.left - b.left).every((p, i, all) => i === 0 || p.left >= all[i - 1].right - 1e-9)
+);
+check(
+  "every word is still there, in reading order of the sentence",
+  rowling.pieces.map((p) => p.word).sort().join() === "0,1,2,3,3,4"
+);
+
+const brackets = laidOut(["لە", "(New", "York)", "دەژی."], "rtl");
+check("brackets go to the run's outer ends", visual(brackets.pieces) === "دەژی. ) New York ( لە", visual(brackets.pieces));
+
+const english = laidOut(["He", "said", "«ئێوە", "چۆنن»", "today."], "ltr");
+check("a Kurdish phrase in English reads right to left", visual(english.pieces) === "He said « چۆنن ئێوە » today.", visual(english.pieces));
+check("its words are drawn right to left", english.pieces.filter((p) => p.dir === "rtl").map((p) => p.text).join() === "چۆنن,ئێوە");
+
+const plain = laidOut(["ئەو", "لە", "Facebook", "کار", "دەکات."], "rtl");
+check(
+  "one foreign word, or none: every word stays exactly where it was",
+  plain.pieces.length === plain.boxes.length &&
+    plain.pieces.every((p, i) => p.word === i && p.left === plain.boxes[i].left && p.right === plain.boxes[i].right && p.dir === "rtl")
+);
+
+const twoSentences = laidOut(["Rowling.", "Harry", "Potter"], "rtl", [0, 1, 1]);
+check(
+  "a run never crosses into the next sentence",
+  visual(twoSentences.pieces) === "Harry Potter Rowling.",
+  visual(twoSentences.pieces)
+);
 
 done("story layout");

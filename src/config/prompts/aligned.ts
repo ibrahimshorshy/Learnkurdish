@@ -166,4 +166,8 @@ export const alignedMode: TranscribeModeSpec = {
   prompt: alignedPrompt,
   schema: alignedSchema,
   toRawLines: alignedToRawLines,
+  // The text and its order are the script's: the server must neither "clean"
+  // a sentence (a quote, a dash, a list number are the teacher's) nor sort
+  // the sentences by the model's rough times.
+  normalize: { keepText: true, keepOrder: true },
 };

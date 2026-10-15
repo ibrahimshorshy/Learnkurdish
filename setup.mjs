@@ -180,10 +180,10 @@ const openBrowser = (url) => {
   spawnSync(opener, [url], { stdio: "ignore", shell: platform === "win32" });
 };
 
-/** Whether anything at all is listening on a port. */
-function portTaken(port) {
+/** Whether anything is listening on a port at one address. */
+function listening(host, port) {
   return new Promise((resolve) => {
-    const probe = createConnection({ host: "127.0.0.1", port });
+    const probe = createConnection({ host, port });
     probe.setTimeout(600);
     probe.on("connect", () => {
       probe.destroy();
@@ -198,23 +198,35 @@ function portTaken(port) {
 }
 
 /**
+ * Whether anything at all is listening on a port, at either loopback. The
+ * browser may take "localhost" to ::1 first (Windows does), so a program there
+ * counts even when 127.0.0.1 is free. Without IPv6 the ::1 probe just fails.
+ */
+async function portTaken(port) {
+  return (await listening("127.0.0.1", port)) || (await listening("::1", port));
+}
+
+/**
  * Whether the thing on that port is us, rather than some unrelated program.
- * Asked at 127.0.0.1, the address portTaken probed and the server always
- * listens on: Node may resolve "localhost" to ::1 first, which a computer
- * without IPv6 does not have. (The browser still opens localhost, because it
- * keeps the projects per address.)
+ * Asked by address rather than at "localhost", which Node may resolve to ::1
+ * first even on a computer without IPv6. The app listens on 127.0.0.1 (and
+ * ::1 where there is one) unless HOST says otherwise; the browser still opens
+ * localhost, because it keeps the projects per address.
  */
 async function isOurApp(port) {
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/api/health`, {
-      signal: AbortSignal.timeout(1500),
-    });
-    if (!res.ok) return false;
-    const body = await res.json();
-    return body?.status === "ok" && body?.app === "leen-kurdish-studio";
-  } catch {
-    return false;
+  for (const host of ["127.0.0.1", "[::1]"]) {
+    try {
+      const res = await fetch(`http://${host}:${port}/api/health`, {
+        signal: AbortSignal.timeout(1500),
+      });
+      if (!res.ok) continue;
+      const body = await res.json();
+      if (body?.status === "ok" && body?.app === "leen-kurdish-studio") return true;
+    } catch {
+      // Nothing there, or not us: try the other loopback.
+    }
   }
+  return false;
 }
 
 let port = Number(PORT);

@@ -594,16 +594,32 @@ function receiveAudio(req: Request, res: Response, next: NextFunction) {
   });
 }
 
+/**
+ * Fires when the app stops waiting for this request. abortOnClose only hears
+ * a hang-up from now on, and the route starts only once the upload is saved:
+ * a long recording takes seconds to write to disk, and the app may have
+ * dropped the request meanwhile (a preset clicked straight after another).
+ * That client has already gone, so its work never starts.
+ */
+export function cancelSignal(req: Request, res: Response): AbortSignal {
+  if (res.destroyed || req.socket?.destroyed) return AbortSignal.abort();
+  return abortOnClose(res);
+}
+
 /** Resolves once `res` can take more, or the request has gone. */
 function drained(res: Response, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    if (signal.aborted) return resolve();
+    // A closed connection never drains: waiting for it would hold the handler,
+    // and the work folder with it, for good.
+    if (signal.aborted || res.destroyed) return resolve();
     const done = () => {
       res.off("drain", done);
+      res.off("close", done);
       signal.removeEventListener("abort", done);
       resolve();
     };
     res.on("drain", done);
+    res.on("close", done);
     signal.addEventListener("abort", done);
   });
 }
@@ -612,7 +628,7 @@ export function registerAudioRoutes(app: Express) {
   app.post("/api/audio/process", receiveAudio, async (req, res): Promise<any> => {
     const uploaded = req.file?.path;
     // The app drops its request when the preset changes; the work for it stops with it.
-    const signal = abortOnClose(res);
+    const signal = cancelSignal(req, res);
     let workDir: string | null = null;
     try {
       if (!uploaded) return res.status(400).json({ error: "No audio was sent." });
@@ -632,18 +648,31 @@ export function registerAudioRoutes(app: Express) {
           `latency ${cleaned.latency} samples corrected, ${Date.now() - started}ms`
       );
 
+      const length = 44 + cleaned.samples * 2;
       res.status(200);
       res.setHeader("Content-Type", "audio/wav");
-      res.setHeader("Content-Length", String(44 + cleaned.samples * 2));
+      res.setHeader("Content-Length", String(length));
       res.setHeader("X-Audio-Samples", String(cleaned.samples));
       res.setHeader("X-Audio-Rate", String(PROCESS_RATE));
       // Streamed: a long recording is never whole in memory here.
+      let sent = 0;
       for await (const chunk of wav16Chunks(cleaned, signal)) {
+        sent += chunk.length;
+        if (sent >= length) {
+          // The last of it. The client may hang up as soon as it has all it
+          // was promised, so nothing after this waits on the connection: that
+          // close is not a cancel.
+          res.end(chunk);
+          break;
+        }
         if (!res.write(chunk)) await drained(res, signal);
-        if (signal.aborted) break;
+        if (signal.aborted || res.destroyed) break;
       }
-      stopIfAborted(signal);
-      res.end();
+      if (sent < length) {
+        stopIfAborted(signal);
+        if (res.destroyed) throw new ToolAborted("Audio clean-up");
+        throw new Error(`The cleaned audio came out short (${sent} of ${length} bytes).`);
+      }
     } catch (err: any) {
       if (signal.aborted || isAborted(err)) {
         // Nothing more is sent: nobody is listening.

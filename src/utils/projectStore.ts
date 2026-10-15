@@ -150,7 +150,13 @@ export function normalizeProject(raw: any): Project {
     kind,
     audiences,
     cuts: Array.isArray(raw?.cuts) ? raw.cuts : [],
-    audioFx: { ...base.audioFx, ...(raw?.audioFx ?? (raw?.kind ? {} : { preset: "raw" })) },
+    // 1.0 (no kind) played each line exactly as recorded: no clean-up and no
+    // shortened pauses, so an old lesson re-rendered sounds the way it did.
+    audioFx: raw?.audioFx
+      ? { ...base.audioFx, ...raw.audioFx }
+      : raw?.kind
+        ? base.audioFx
+        : { ...base.audioFx, preset: "raw", tightenPauses: false },
     speakers:
       Array.isArray(raw?.speakers) && raw.speakers.length >= 2 ? raw.speakers : [{ name: "" }, { name: "" }],
     intro: raw?.intro ?? { ...defaultCard(), enabled: introOn ?? true },

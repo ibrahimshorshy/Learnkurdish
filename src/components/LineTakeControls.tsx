@@ -26,6 +26,7 @@ export interface LineTakeControlsProps {
   settings: AppSettings;
   /** Smaller layout for the review step. */
   compact?: boolean;
+  /** Writes into this project, even when a take lands after another one was opened. */
   update: (patch: Partial<Project> | ((p: Project) => Partial<Project>)) => void;
 }
 

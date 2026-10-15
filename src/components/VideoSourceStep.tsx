@@ -16,12 +16,15 @@ import { findTextModel } from "../config/models";
 import { useObjectUrl } from "../utils/useObjectUrl";
 import { formatBytes, freshRecordingPatch } from "../utils/projectStore";
 import { extractVideoAudio, readVideoMeta } from "../utils/mediaApi";
+import { UPLOAD_IN_PROGRESS, holdLeave } from "../utils/leaveGuard";
 
 export interface VideoSourceStepProps {
   project: Project;
   settings: AppSettings;
   audio: LessonAudio;
+  /** The video's sound is being transcribed. */
   busy: boolean;
+  /** Writes into this project, even when called after another one was opened. */
   update: (patch: Partial<Project> | ((p: Project) => Partial<Project>)) => void;
   onTranscribe: () => void;
 }
@@ -69,10 +72,15 @@ export default function VideoSourceStep({ project, settings, audio, busy, update
   const hasWork = project.lines.length > 0;
 
   useEffect(() => setPlayable(true), [url]);
-  // Leaving the step (or the tab) stops an upload in flight.
+  // Leaving the step (or the tab) stops an upload in flight; the app asks first.
   useEffect(() => () => abortRef.current?.abort(), []);
+  const uploading = job !== null;
+  useEffect(() => (uploading ? holdLeave(UPLOAD_IN_PROGRESS) : undefined), [uploading]);
 
   const accept = async (file: File) => {
+    // A new video while this one is being transcribed would get the old one's
+    // lines and timings; Replace is disabled then, and so is dropping a file.
+    if (busy || job) return;
     setProblem(null);
     if (!isVideoFile(file)) {
       setProblem("That doesn't look like a video. Upload an MP4, MOV, WebM or MKV file.");
@@ -149,7 +157,7 @@ export default function VideoSourceStep({ project, settings, audio, busy, update
     e.preventDefault();
     setDragging(false);
     const file = e.dataTransfer.files?.[0];
-    if (file && !job) void accept(file);
+    if (file && !job && !busy) void accept(file);
   };
 
   const model = findTextModel(settings.transcribeModel);
@@ -162,7 +170,7 @@ export default function VideoSourceStep({ project, settings, audio, busy, update
         className={`card p-6 flex flex-col gap-4 transition-colors ${dragging ? "!border-brand-blue bg-brand-blue/10" : ""}`}
         onDragOver={(e) => {
           e.preventDefault();
-          if (!job) setDragging(true);
+          if (!job && !busy) setDragging(true);
         }}
         onDragLeave={() => setDragging(false)}
         onDrop={onDrop}

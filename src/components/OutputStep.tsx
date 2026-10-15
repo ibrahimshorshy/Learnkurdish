@@ -20,6 +20,7 @@ import { loadCardsInput } from "../render/cards";
 import { fingerprint, outputKey, videoLinesFrom } from "../lessonActions";
 import { newId } from "../utils/projectStore";
 import { asciiFileName, downloadBlob } from "../utils/download";
+import { RENDER_IN_PROGRESS, holdLeave } from "../utils/leaveGuard";
 import { formatTime, stopPlayback } from "../audio/audioTools";
 import { ErrorNote, Field, Segmented, Slider, Toggle, VideoCard, languagesLabel } from "./ui";
 import IntroOutroPanel from "./IntroOutroPanel";
@@ -32,6 +33,7 @@ interface Props {
   logoSrc: string;
   /** The recording is still being cleaned up in the background. */
   processing?: boolean;
+  /** Writes into this project, even when called after another one was opened. */
   update: (patch: Partial<Project> | ((p: Project) => Partial<Project>)) => void;
 }
 
@@ -148,6 +150,12 @@ export default function OutputStep({ project, sources, settings, ffmpeg, logoSrc
   const [job, setJob] = useState<{ label: string; progress: number; index: number; count: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Leaving the step (another step, tab or project) cancels a render, rather
+  // than leaving it running with no progress bar and no Cancel button; the app
+  // asks before that happens.
+  useEffect(() => () => abortRef.current?.abort(), []);
+  const rendering = job !== null;
+  useEffect(() => (rendering ? holdLeave(RENDER_IN_PROGRESS) : undefined), [rendering]);
 
   const makeVideos = async () => {
     if (!lines.length) return;
@@ -157,6 +165,8 @@ export default function OutputStep({ project, sources, settings, ffmpeg, logoSrc
     const controller = new AbortController();
     abortRef.current = controller;
     const outputs = v.outputs.filter((o) => o.every((id) => project.audiences.includes(id)));
+    // Everything below reads this project as it was when Make was clicked.
+    const projectId = project.id;
     try {
       for (let i = 0; i < outputs.length; i++) {
         const langs = outputs[i];
@@ -190,15 +200,19 @@ export default function OutputStep({ project, sources, settings, ffmpeg, logoSrc
           fingerprint: fingerprint(project, langs),
         };
         // Save each one as it lands, so a failure later keeps the earlier ones.
-        update((p) => ({
-          renders: [video, ...p.renders.filter((r) => outputKey(r.languages) !== outputKey(langs))],
-        }));
+        // `update` writes into this project even if another one is open now.
+        update((p) =>
+          p.id !== projectId
+            ? {}
+            : { renders: [video, ...p.renders.filter((r) => outputKey(r.languages) !== outputKey(langs))] }
+        );
+        if (controller.signal.aborted) break;
       }
     } catch (err) {
       if ((err as DOMException)?.name !== "AbortError") setError(err instanceof Error ? err.message : String(err));
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setJob(null);
-      abortRef.current = null;
     }
   };
 

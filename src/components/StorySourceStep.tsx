@@ -44,6 +44,7 @@ import { findTextModel } from "../config/models";
 import { useObjectUrl } from "../utils/useObjectUrl";
 import {
   STORY_FILE_ACCEPT,
+  linesToStoryText,
   matchLinesToScript,
   readStoryFile,
   scriptToText,
@@ -129,16 +130,15 @@ export default function StorySourceStep({ project, settings, audio, audioError, 
     onTranscribe();
   };
 
-  /** The transcribed lines, back into the text box: one sentence per line, paragraphs kept. */
+  /**
+   * The transcribed lines, back into the text box: one line per text line,
+   * paragraphs kept. A line that holds two sentences becomes two sentences of
+   * the script again, and still matches (matchLinesToScript pairs a merged
+   * line with the sentences it holds), so this always clears the warning.
+   */
   const copyLinesToText = () => {
     if (!window.confirm("Replace the text with the transcribed sentences? Anything in the text that is not among them is dropped.")) return;
-    const paragraphs: string[][] = [];
-    project.lines.forEach((line, i) => {
-      if (!line.kurdish.trim()) return;
-      if (i === 0 || line.paragraphStart || !paragraphs.length) paragraphs.push([]);
-      paragraphs[paragraphs.length - 1].push(line.kurdish.trim());
-    });
-    setText(paragraphs.map((p) => p.join("\n")).join("\n\n"));
+    setText(linesToStoryText(project.lines));
   };
 
   /* ---------- recording ---------- */

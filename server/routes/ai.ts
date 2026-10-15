@@ -62,7 +62,7 @@ export function registerAiRoutes(app: Express) {
       );
 
       const data = parseJson(result.response.text);
-      const transcript = normalizeTranscript(mode.toRawLines(data, input), input.durationSeconds);
+      const transcript = normalizeTranscript(mode.toRawLines(data, input), input.durationSeconds, mode.normalize);
       console.log(
         `Transcribed ${transcript.lines.length} lines (${req.body?.mode || "lines"}) with ${result.model}` +
           (transcript.timesTrusted ? "" : " (times not usable — the app will place them from the audio)")

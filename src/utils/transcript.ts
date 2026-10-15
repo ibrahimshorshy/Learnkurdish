@@ -79,12 +79,48 @@ export function cleanLineText(text: string): string {
     .trim();
 }
 
-export function normalizeTranscript(raw: RawTranscriptLine[], durationSeconds: number): NormalizedTranscript {
+/**
+ * How a mode's lines are tidied. Both are for a known text (the aligned
+ * mode): the words and their order come from the script the teacher wrote,
+ * not from the model, so neither may be changed here.
+ */
+export interface NormalizeOptions {
+  /**
+   * Keep each line's text as written; only runs of whitespace are tidied.
+   * cleanLineText would strip a quote, a dash or a list number the teacher
+   * wrote on purpose («چۆنی؟», "- بۆ کوێ؟", "1. ...").
+   */
+  keepText?: boolean;
+  /**
+   * Keep the lines in the order given rather than sorting them by time. A
+   * start a little before the previous line's (within the tolerance the times
+   * are trusted to anyway) is moved up to it; one that leaves a line with
+   * almost no time of its own means the times are not usable.
+   */
+  keepOrder?: boolean;
+}
+
+/** How far a start may run before the previous line's and the times still be trusted. */
+const ORDER_TOLERANCE = 0.5;
+/** keepOrder: a line moved up to its neighbour must keep at least this much time of its own. */
+const MIN_OWN_TIME = 0.15;
+
+/** Collapses whitespace only: the text is known and kept as written. */
+function tidySpaces(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+export function normalizeTranscript(
+  raw: RawTranscriptLine[],
+  durationSeconds: number,
+  options: NormalizeOptions = {}
+): NormalizedTranscript {
   const duration = Math.max(0, durationSeconds || 0);
+  const tidy = options.keepText ? tidySpaces : cleanLineText;
 
   const parsed = (Array.isArray(raw) ? raw : [])
     .map((line) => ({
-      text: cleanLineText(String(line?.text ?? "")),
+      text: tidy(String(line?.text ?? "")),
       start: parseTimestamp(line?.start),
       end: parseTimestamp(line?.end),
       ...extras(line),
@@ -93,29 +129,9 @@ export function normalizeTranscript(raw: RawTranscriptLine[], durationSeconds: n
 
   if (!parsed.length) return { lines: [], timesTrusted: true };
 
-  // Times are only worth keeping if nearly all of them are readable, in order,
-  // inside the recording and not piled up at zero.
-  const readable = parsed.filter(
-    (l) => l.start !== null && l.end !== null && (l.end as number) > (l.start as number)
-  );
-  const limit = duration > 0 ? duration * 1.05 + 0.5 : Infinity;
-  const inside = readable.filter((l) => (l.end as number) <= limit);
-  let ordered = true;
-  for (let i = 1; i < readable.length; i++) {
-    if ((readable[i].start as number) + 0.5 < (readable[i - 1].start as number)) ordered = false;
-  }
-  const allAtZero = readable.length > 1 && readable.every((l) => (l.start as number) < 0.01);
-
-  const timesTrusted =
-    duration > 0 &&
-    readable.length === parsed.length &&
-    inside.length === parsed.length &&
-    ordered &&
-    !allAtZero;
-
-  if (!timesTrusted) {
-    // Spread the lines evenly so the editor still has something to show; the
-    // caller is expected to place them from the audio.
+  // Spread the lines evenly so the editor still has something to show; the
+  // caller is expected to place them from the audio.
+  const untrusted = (): NormalizedTranscript => {
     const span = duration > 0 ? duration : parsed.length * 3;
     const step = span / parsed.length;
     return {
@@ -126,15 +142,59 @@ export function normalizeTranscript(raw: RawTranscriptLine[], durationSeconds: n
       })),
       timesTrusted: false,
     };
-  }
+  };
 
-  const lines = parsed
-    .map((line) => ({
-      ...line,
-      start: Math.min(line.start as number, duration),
-      end: Math.min(line.end as number, duration),
-    }))
-    .sort((a, b) => a.start - b.start);
+  // Times are only worth keeping if nearly all of them are readable, in order,
+  // inside the recording and not piled up at zero.
+  const readable = parsed.filter(
+    (l) => l.start !== null && l.end !== null && (l.end as number) > (l.start as number)
+  );
+  const limit = duration > 0 ? duration * 1.05 + 0.5 : Infinity;
+  const inside = readable.filter((l) => (l.end as number) <= limit);
+  let ordered = true;
+  if (options.keepOrder) {
+    // The order is fixed, so every start must keep up with all the ones
+    // before it, not only with its neighbour.
+    let latest = -Infinity;
+    for (const l of readable) {
+      if ((l.start as number) + ORDER_TOLERANCE < latest) ordered = false;
+      latest = Math.max(latest, l.start as number);
+    }
+  } else {
+    for (let i = 1; i < readable.length; i++) {
+      if ((readable[i].start as number) + ORDER_TOLERANCE < (readable[i - 1].start as number)) ordered = false;
+    }
+  }
+  const allAtZero = readable.length > 1 && readable.every((l) => (l.start as number) < 0.01);
+
+  const timesTrusted =
+    duration > 0 &&
+    readable.length === parsed.length &&
+    inside.length === parsed.length &&
+    ordered &&
+    !allAtZero;
+
+  if (!timesTrusted) return untrusted();
+
+  const lines = parsed.map((line) => ({
+    ...line,
+    start: Math.min(line.start as number, duration),
+    end: Math.min(line.end as number, duration),
+  }));
+
+  if (options.keepOrder) {
+    // The text says which line comes first; a start slightly before the
+    // previous one is the model being imprecise, so it is moved up to it and
+    // the overlap pass below shares out the time. Sorting instead would put
+    // a later sentence before an earlier one, and a paragraph start with it.
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i].start >= lines[i - 1].start) continue;
+      lines[i].start = lines[i - 1].start;
+      if (lines[i].end - lines[i].start < MIN_OWN_TIME) return untrusted();
+    }
+  } else {
+    lines.sort((a, b) => a.start - b.start);
+  }
 
   // Overlap: give the boundary to the midpoint of the overlap.
   for (let i = 1; i < lines.length; i++) {

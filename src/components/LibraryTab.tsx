@@ -3,28 +3,36 @@ import { FolderOpen, Trash2, Mic, Film, Plus, Loader2 } from "lucide-react";
 import type { Project } from "../types";
 import { KINDS, stepsFor } from "../types";
 import { deleteProject, formatBytes, listProjects, projectLabel } from "../utils/projectStore";
+import { inOrder } from "../utils/projectWrites";
 import { formatTime } from "../audio/audioTools";
 
 interface Props {
   currentId: string | null;
   onOpen: (project: Project) => void;
   onNew: () => void;
-  /** Called after the current project is deleted. */
-  onDeletedCurrent: () => void;
+  /** Called just before the open project is deleted, so it can be closed first. */
+  onDeletingCurrent: () => void;
 }
 
-export default function LibraryTab({ currentId, onOpen, onNew, onDeletedCurrent }: Props) {
+export default function LibraryTab({ currentId, onOpen, onNew, onDeletingCurrent }: Props) {
   const [projects, setProjects] = useState<Project[] | null>(null);
 
-  const refresh = () => listProjects().then(setProjects).catch(() => setProjects([]));
+  // In the same queue as results landing in closed projects, so the list shows them.
+  const refresh = () =>
+    inOrder(listProjects)
+      .then(setProjects)
+      .catch(() => setProjects([]));
   useEffect(() => {
     void refresh();
   }, []);
 
   const remove = async (project: Project) => {
     if (!window.confirm(`Delete “${projectLabel(project)}”? The recording and its videos are deleted too.`)) return;
-    await deleteProject(project.id);
-    if (project.id === currentId) onDeletedCurrent();
+    // Closed first, so its autosave cannot store it again afterwards; and
+    // queued, so a result still landing in it is written before the delete,
+    // or finds it gone — never brings it back.
+    if (project.id === currentId) onDeletingCurrent();
+    await inOrder(() => deleteProject(project.id)).catch(() => {});
     void refresh();
   };
 

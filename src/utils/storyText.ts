@@ -317,26 +317,105 @@ export interface TextMatch {
   missingSentences: number;
 }
 
+/** Most sentences one line may hold, or lines one sentence may be split into, and still match. */
+const MAX_JOINED = 4;
+
 /**
  * How a project's lines line up with its script: the lines should be the
  * script's sentences, in order, minus any the reader skipped.
+ *
+ * Lines merged or split on the transcript step still match: a line that is two
+ * or more sentences in a row, or a sentence spread over two or more lines in a
+ * row, pairs up as a whole. Their words are all in the text, and a text built
+ * from such lines (one line per text line) splits back into the same words.
  */
 export function matchLinesToScript(lineTexts: string[], script: string[] | undefined): TextMatch {
   const sentences = (script ?? []).map((l) => sentenceKey(stripMarker(l).text)).filter(Boolean);
   const lines = lineTexts.map(sentenceKey).filter(Boolean);
-  // Longest common subsequence: the lines and sentences that pair up in order.
   const n = lines.length;
   const m = sentences.length;
-  let prev = new Array<number>(m + 1).fill(0);
-  for (let i = 1; i <= n; i++) {
-    const row = new Array<number>(m + 1).fill(0);
-    for (let j = 1; j <= m; j++) {
-      row[j] = lines[i - 1] === sentences[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], row[j - 1]);
+
+  // Every run of up to MAX_JOINED keys ending at each position, run together
+  // and numbered, so the pairing below compares numbers, not strings.
+  // runs[end * K + k - 1]: the k keys just before `end`; -1 where there are fewer.
+  const K = MAX_JOINED;
+  const ids = new Map<string, number>();
+  const runsOf = (keys: string[]) => {
+    const runs = new Int32Array((keys.length + 1) * K).fill(-1);
+    for (let end = 1; end <= keys.length; end++) {
+      let joined = "";
+      for (let k = 1; k <= Math.min(K, end); k++) {
+        joined = keys[end - k] + joined;
+        let id = ids.get(joined);
+        if (id === undefined) {
+          id = ids.size;
+          ids.set(joined, id);
+        }
+        runs[end * K + k - 1] = id;
+      }
     }
-    prev = row;
+    return runs;
+  };
+  const lineRuns = runsOf(lines);
+  const sentenceRuns = runsOf(sentences);
+
+  // An ordered pairing, like a longest common subsequence, except that one
+  // line may pair with up to MAX_JOINED sentences in a row and the other way
+  // round. score: lines and sentences paired; paired: of which lines.
+  const width = m + 1;
+  const score = new Int32Array((n + 1) * width);
+  const paired = new Int32Array((n + 1) * width);
+  let best = 0;
+  let bestLines = 0;
+  /** Reaching the current cell from cell `from`, pairing `lineCount` lines with `sentenceCount` sentences. */
+  const take = (from: number, lineCount: number, sentenceCount: number) => {
+    const s = score[from] + lineCount + sentenceCount;
+    const p = paired[from] + lineCount;
+    if (s > best || (s === best && p > bestLines)) {
+      best = s;
+      bestLines = p;
+    }
+  };
+  for (let i = 1; i <= n; i++) {
+    const line = lineRuns[i * K];
+    for (let j = 1; j <= m; j++) {
+      const sentence = sentenceRuns[j * K];
+      best = -1;
+      bestLines = 0;
+      take((i - 1) * width + j, 0, 0); // the line is stray
+      take(i * width + j - 1, 0, 0); // the sentence is missing
+      // One line, one or more sentences in a row.
+      for (let k = 1; k <= Math.min(K, j); k++) {
+        if (sentenceRuns[j * K + k - 1] === line) take((i - 1) * width + j - k, 1, k);
+      }
+      // One sentence over two or more lines in a row.
+      for (let k = 2; k <= Math.min(K, i); k++) {
+        if (lineRuns[i * K + k - 1] === sentence) take((i - k) * width + j - 1, k, 1);
+      }
+      score[i * width + j] = best;
+      paired[i * width + j] = bestLines;
+    }
   }
-  const paired = prev[m];
-  return { strayLines: n - paired, missingSentences: m - paired };
+  const pairedLines = paired[n * width + m];
+  const pairedSentences = score[n * width + m] - pairedLines;
+  return { strayLines: n - pairedLines, missingSentences: m - pairedSentences };
+}
+
+/**
+ * Transcribed lines back into story text: one line per text line, a blank
+ * line before each paragraph. What "Use the sentences as the text" writes.
+ * A line holding two sentences is split again when the text becomes the
+ * script, and matchLinesToScript pairs it with both.
+ */
+export function linesToStoryText(lines: { kurdish: string; paragraphStart?: boolean }[]): string {
+  const paragraphs: string[][] = [];
+  lines.forEach((line, i) => {
+    const text = line.kurdish.replace(/\s+/g, " ").trim();
+    if (!text) return;
+    if (i === 0 || line.paragraphStart || !paragraphs.length) paragraphs.push([]);
+    paragraphs[paragraphs.length - 1].push(text);
+  });
+  return paragraphs.map((p) => p.join("\n")).join("\n\n");
 }
 
 /* ------------------------------------------------------------------ */

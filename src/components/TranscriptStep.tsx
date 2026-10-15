@@ -27,7 +27,7 @@ import DialogueSpeakers from "./DialogueSpeakers";
 import AutoTextarea from "./AutoTextarea";
 import { formatTime } from "../audio/audioTools";
 import { placeLinesByLength, snapLinesToPauses } from "../audio/segmentation";
-import { mergeLines, splitLine, untranslated } from "../lessonActions";
+import { mergeDropsTakes, mergeLines, removeLine, splitLine, untranslated } from "../lessonActions";
 import { newId, speakerName } from "../utils/projectStore";
 import { AUDIENCE_LANGUAGES } from "../config/languages";
 
@@ -91,7 +91,9 @@ export default function TranscriptStep({
 
   const split = (index: number) => {
     const line = lines[index];
-    const parts = splitLine(line, caretRef.current[line.id] ?? -1, raw);
+    // A line with its own take has the take split too, at a pause in the take.
+    const takeAudio = line.take ? (audio.sources.takes.get(line.take.id) ?? null) : null;
+    const parts = splitLine(line, caretRef.current[line.id] ?? -1, raw, takeAudio);
     if (!parts) {
       window.alert("Put the cursor where the line should be split, between two words.");
       return;
@@ -102,7 +104,19 @@ export default function TranscriptStep({
 
   const merge = (index: number) => {
     if (index >= lines.length - 1) return;
-    const merged = mergeLines(lines[index], lines[index + 1]);
+    const [a, b] = [lines[index], lines[index + 1]];
+    if (mergeDropsTakes(a, b)) {
+      // A merged line has one sound, so it cannot keep a take that holds only half its words.
+      const both = Boolean(a.take && b.take);
+      const which = both
+        ? `Lines ${index + 1} and ${index + 2} have their own new takes`
+        : `Line ${a.take ? index + 1 : index + 2} has its own new take`;
+      const ok = window.confirm(
+        `${which}. The merged line plays from your main recording, so ${both ? "both takes" : "the take"} will be deleted and your original recording of those words used again. Merge anyway?`
+      );
+      if (!ok) return;
+    }
+    const merged = mergeLines(a, b);
     setLines([...lines.slice(0, index), merged, ...lines.slice(index + 2)]);
     setSelectedId(merged.id);
   };
@@ -110,7 +124,7 @@ export default function TranscriptStep({
   const remove = (index: number) => {
     const line = lines[index];
     if (line.kurdish.trim() && !window.confirm(`Delete line ${index + 1}?`)) return;
-    setLines(lines.filter((_, i) => i !== index));
+    setLines(removeLine(lines, index));
   };
 
   const addAfter = (index: number) => {

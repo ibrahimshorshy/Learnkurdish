@@ -24,9 +24,17 @@
  */
 
 import { ensureAllFontsLoaded } from "../utils/fontLoader";
-import type { VideoStrings } from "../config/languages";
+import { findAudienceLanguage, type VideoStrings } from "../config/languages";
 import { FONTS } from "./themes";
-import { drawWrappedText, easeOutCubic, envelope, isRtlText, layoutText } from "./textLayout";
+import {
+  drawWrappedText,
+  easeOutCubic,
+  envelope,
+  firstStrongDirection,
+  isRtlText,
+  layoutText,
+  type TextDirection,
+} from "./textLayout";
 import type { ScheduledClip } from "./audioMixdown";
 import { splitWords } from "./audioAlign";
 import { buildTimeline, eventAt } from "./timeline";
@@ -39,9 +47,12 @@ import {
   pageWindows,
   paginate,
   paragraphGroups,
+  placeLine,
   sentenceState,
   withPauses,
+  wordDirections,
   wordsSpoken,
+  type WordBox,
 } from "./storyLayout";
 
 /* ------------------------------------------------------------------ */
@@ -112,6 +123,7 @@ const TRANSLATION_FUTURE_ALPHA = 0.4;
 /* ------------------------------------------------------------------ */
 
 interface RichWord {
+  /** A word, or part of one: a run of the other direction has its outer punctuation split off. */
   text: string;
   /** Where to draw it: the right edge for right-to-left text, the left edge otherwise. */
   x: number;
@@ -120,6 +132,8 @@ interface RichWord {
   /** Which sentence (line index) it belongs to, and its place in that sentence. */
   sentence: number;
   index: number;
+  /** Drawn in this direction rather than the block's: a word inside a run of the other direction. */
+  dir?: TextDirection;
 }
 
 interface RichLine {
@@ -150,6 +164,12 @@ type Align = "justify" | "start";
  * words are long, so some breaks leave a lot of room; if any line's gaps would
  * have to stretch past about twice their size, the block is left ragged rather
  * than torn apart.
+ *
+ * Every word is drawn on its own, which keeps the canvas from reordering
+ * words of the other direction the way a browser would; placeLine does that
+ * instead, so "J. K. Rowling" in a Kurdish sentence reads in its own order.
+ * `direction` is the block's, when its language is known; otherwise it is
+ * right to left if the text holds any right-to-left letter.
  */
 function layoutRich(
   ctx: CanvasRenderingContext2D,
@@ -158,20 +178,40 @@ function layoutRich(
   lineHeight: number,
   maxWidth: number,
   centerX: number,
-  align: Align
+  align: Align,
+  direction?: TextDirection
 ): RichBlock {
   const used = parts.map((p) => ({ ...p, text: p.text.trim() })).filter((p) => p.text);
   const owners: { sentence: number; index: number }[] = [];
   for (const part of used) splitWords(part.text).forEach((_, index) => owners.push({ sentence: part.sentence, index }));
+  const ownerOf = (k: number) => owners[k] ?? { sentence: used[used.length - 1]?.sentence ?? 0, index: 0 };
 
   ctx.font = font;
   const text = used.map((p) => p.text).join(" ");
-  const layout = layoutText(ctx, text, maxWidth, true);
+  const layout = layoutText(ctx, text, maxWidth, true, direction);
   const rtl = layout.isRtl;
+  const base: TextDirection = rtl ? "rtl" : "ltr";
   const previous = ctx.direction;
-  ctx.direction = rtl ? "rtl" : "ltr";
+  ctx.direction = base;
   const space = ctx.measureText(" ").width;
   ctx.direction = previous;
+  /** Punctuation split off a run is drawn in the block's direction, so measured in it. */
+  const measurePiece = (piece: string) => {
+    const before = ctx.direction;
+    ctx.font = font;
+    ctx.direction = base;
+    const width = ctx.measureText(piece).width;
+    ctx.direction = before;
+    return width;
+  };
+
+  // Which way each word reads, sentence by sentence.
+  const allWords = layout.lines.flatMap((line) => line.words.map((w) => w.text));
+  const dirs = wordDirections(
+    allWords,
+    base,
+    allWords.map((_, k) => ownerOf(k).sentence)
+  );
 
   const blockWidth = layout.lines.reduce((w, l) => Math.max(w, l.width), 0);
   const startEdge = rtl ? centerX + blockWidth / 2 : centerX - blockWidth / 2;
@@ -189,13 +229,31 @@ function layoutRich(
   const lines: RichLine[] = layout.lines.map((line, li) => {
     const isLast = li === layout.lines.length - 1;
     const extra = justify && !isLast ? stretchOf(line) : 0;
-    const words: RichWord[] = line.words.map((word, wi) => {
-      const owner = owners[layout.lineWordStart[li] + wi] ?? { sentence: used[used.length - 1]?.sentence ?? 0, index: 0 };
+    const first = layout.lineWordStart[li];
+    // Each word's box in reading order from the start edge...
+    const boxes: WordBox[] = line.words.map((word, wi) => {
       const offset = word.offset + extra * wi;
       const x = rtl ? startEdge - offset : startEdge + offset;
-      const left = rtl ? x - word.width : x;
-      const right = rtl ? x : x + word.width;
-      return { text: word.text, x, left, right, sentence: owner.sentence, index: owner.index };
+      return {
+        text: word.text,
+        left: rtl ? x - word.width : x,
+        right: rtl ? x : x + word.width,
+        dir: dirs[first + wi],
+        group: ownerOf(first + wi).sentence,
+      };
+    });
+    // ...then runs of the other direction turned round inside their room.
+    const words: RichWord[] = placeLine(boxes, base, measurePiece).map((piece) => {
+      const owner = ownerOf(first + piece.word);
+      return {
+        text: piece.text,
+        x: rtl ? piece.right : piece.left,
+        left: piece.left,
+        right: piece.right,
+        sentence: owner.sentence,
+        index: owner.index,
+        ...(piece.dir !== base ? { dir: piece.dir } : {}),
+      };
     });
     for (const word of words) {
       const list = spans.get(word.sentence) ?? [];
@@ -214,6 +272,17 @@ function layoutRich(
   return { font, rtl, lineHeight, height: lines.length * lineHeight, lines, spans };
 }
 
+/** Draws one word of a block; the caller has set the block's font, direction and alignment. */
+function fillWord(ctx: CanvasRenderingContext2D, block: RichBlock, word: RichWord, y: number) {
+  if (!word.dir) {
+    ctx.fillText(word.text, word.x, y);
+    return;
+  }
+  ctx.direction = word.dir;
+  ctx.fillText(word.text, word.x, y);
+  ctx.direction = block.rtl ? "rtl" : "ltr";
+}
+
 /* ------------------------------------------------------------------ */
 /* Pages                                                                */
 /* ------------------------------------------------------------------ */
@@ -225,6 +294,8 @@ interface PlacedText {
   /** Middle of the block. */
   centerY: number;
   color: string;
+  /** Which way it reads. Unset: worked out from the text, as for the pronunciation. */
+  direction?: TextDirection;
 }
 
 interface Page {
@@ -272,10 +343,20 @@ export async function prepareStory(options: PrepareOptions): Promise<PreparedLes
   const px = (spec: TypeSpec, k: number) => Math.max(1, Math.round(spec.size * k * s));
   const fontOf = (spec: TypeSpec, k: number, family: string) => `${spec.weight} ${px(spec, k)}px ${family}`;
   const lineHeightOf = (spec: TypeSpec, k: number) => px(spec, k) * spec.lineHeight;
-  const countLines = (text: string, font: string) => {
+  const countLines = (text: string, font: string, direction?: TextDirection) => {
     if (!text.trim()) return 0;
     measure.font = font;
-    return layoutText(measure, text, maxTextW).lines.length;
+    return layoutText(measure, text, maxTextW, false, direction).lines.length;
+  };
+  /**
+   * A translation reads the way its language does, whatever words it quotes:
+   * an English sentence that starts with a Kurdish word is still English.
+   * A language the app does not know goes by its first letter.
+   */
+  const directionOf = (id: string, text: string): TextDirection => {
+    const language = findAudienceLanguage(id);
+    if (language) return language.rtl ? "rtl" : "ltr";
+    return firstStrongDirection(text) ?? "ltr";
   };
   const specFor = (list: TypeSpec[], i: number) => list[Math.min(i, list.length - 1)];
   const translationOf = (line: number, id: string) => (lines[line].translations[id] || "").trim();
@@ -301,7 +382,7 @@ export async function prepareStory(options: PrepareOptions): Promise<PreparedLes
       const text = translationOf(line, id);
       if (!text) return;
       const spec = specFor(SENTENCE_TRANSLATION, i);
-      heights.push(countLines(text, fontOf(spec, k, familyFor(text))) * lineHeightOf(spec, k));
+      heights.push(countLines(text, fontOf(spec, k, familyFor(text)), directionOf(id, text)) * lineHeightOf(spec, k));
     });
     return heights.reduce((a, b) => a + b, 0) + Math.max(0, heights.length - 1) * BLOCK_GAP * k * s;
   };
@@ -312,7 +393,7 @@ export async function prepareStory(options: PrepareOptions): Promise<PreparedLes
       const text = paragraphTranslation(first, last, id);
       if (!text) return;
       const spec = specFor(PARAGRAPH_TRANSLATION, i);
-      heights.push(countLines(text, fontOf(spec, k, familyFor(text))) * lineHeightOf(spec, k));
+      heights.push(countLines(text, fontOf(spec, k, familyFor(text)), directionOf(id, text)) * lineHeightOf(spec, k));
     });
     return heights.reduce((a, b) => a + b, 0) + Math.max(0, heights.length - 1) * BLOCK_GAP * k * s;
   };
@@ -405,19 +486,27 @@ export async function prepareStory(options: PrepareOptions): Promise<PreparedLes
       for (let i = plan.first; i <= plan.last; i++) {
         const blocks: PlacedText[] = [];
         let cursor = zoneTop;
-        const place = (text: string, spec: TypeSpec, family: string, color: string) => {
+        const place = (text: string, spec: TypeSpec, family: string, color: string, direction?: TextDirection) => {
           const font = fontOf(spec, k, family);
           const lineHeight = lineHeightOf(spec, k);
-          const h = countLines(text, font) * lineHeight;
+          const h = countLines(text, font, direction) * lineHeight;
           if (blocks.length) cursor += gap;
-          blocks.push({ text, font, lineHeight, centerY: cursor + h / 2, color });
+          blocks.push({ text, font, lineHeight, centerY: cursor + h / 2, color, ...(direction ? { direction } : {}) });
           cursor += h;
         };
         const translitText = lines[i].transliteration.trim();
         if (translit && translitText) place(translitText, TRANSLIT, FONTS.latin, palette.translit);
         languages.forEach((id, li) => {
           const text = translationOf(i, id);
-          if (text) place(text, specFor(SENTENCE_TRANSLATION, li), familyFor(text), translationColors[li] ?? palette.translation);
+          if (text) {
+            place(
+              text,
+              specFor(SENTENCE_TRANSLATION, li),
+              familyFor(text),
+              translationColors[li] ?? palette.translation,
+              directionOf(id, text)
+            );
+          }
         });
         sentenceBlocks.set(i, blocks);
       }
@@ -436,7 +525,8 @@ export async function prepareStory(options: PrepareOptions): Promise<PreparedLes
           lineHeightOf(spec, k),
           maxTextW,
           cX,
-          "start"
+          "start",
+          directionOf(id, paragraphTranslation(plan.first, plan.last, id))
         );
         if (paragraphBlocks.length) cursor += gap;
         paragraphBlocks.push({ block, top: cursor, color: translationColors[li] ?? palette.translation });
@@ -541,7 +631,7 @@ export async function prepareStory(options: PrepareOptions): Promise<PreparedLes
         else if (spoken === null || word.index < spoken) color = palette.accent;
         ctx.globalAlpha = alpha * strength;
         ctx.fillStyle = color;
-        ctx.fillText(word.text, word.x, y);
+        fillWord(ctx, block, word, y);
       }
     }
     ctx.restore();
@@ -561,7 +651,7 @@ export async function prepareStory(options: PrepareOptions): Promise<PreparedLes
           const state = sentenceState(word.sentence, current);
           ctx.globalAlpha =
             alpha * (state === "current" ? 1 : state === "past" ? TRANSLATION_PAST_ALPHA : TRANSLATION_FUTURE_ALPHA);
-          ctx.fillText(word.text, word.x, y);
+          fillWord(ctx, block, word, y);
         }
       }
       ctx.restore();
@@ -578,7 +668,7 @@ export async function prepareStory(options: PrepareOptions): Promise<PreparedLes
     for (const block of blocks) {
       ctx.fillStyle = block.color;
       ctx.font = block.font;
-      drawWrappedText(ctx, block.text, cX, block.centerY, maxTextW, block.lineHeight);
+      drawWrappedText(ctx, block.text, cX, block.centerY, maxTextW, block.lineHeight, { direction: block.direction });
     }
     ctx.restore();
   }

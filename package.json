@@ -10,7 +10,7 @@
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "lint": "tsc --noEmit",
-    "test": "tsx tests/segmentation.test.mjs && tsx tests/languages.test.mjs && tsx tests/timeline.test.mjs && tsx tests/transcriptParse.test.mjs && tsx tests/cards.test.mjs && tsx tests/clipBuilder.test.mjs && tsx tests/audioPresets.test.mjs && tsx tests/dialogue.test.mjs && tsx tests/subtitles.test.mjs && tsx tests/storyText.test.mjs && tsx tests/aligned.test.mjs && tsx tests/storyLayout.test.mjs"
+    "test": "tsx tests/segmentation.test.mjs && tsx tests/languages.test.mjs && tsx tests/timeline.test.mjs && tsx tests/transcriptParse.test.mjs && tsx tests/cards.test.mjs && tsx tests/clipBuilder.test.mjs && tsx tests/audioPresets.test.mjs && tsx tests/dialogue.test.mjs && tsx tests/subtitles.test.mjs && tsx tests/storyText.test.mjs && tsx tests/aligned.test.mjs && tsx tests/storyLayout.test.mjs && tsx tests/lineEdits.test.mjs && tsx tests/projectStore.test.mjs && tsx tests/serverSecurity.test.mjs && tsx tests/mediaServer.test.mjs && tsx tests/videoRoutes.test.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

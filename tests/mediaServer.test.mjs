@@ -6,6 +6,7 @@ import multer from "multer";
 import { toBt709, hdrToSdr, isHdr, TAG_BT709 } from "../server/color.ts";
 import { fieldStorage, videoExtension, uploadProblem, only, VIDEO_FORMATS, MB } from "../server/uploads.ts";
 import { frameFilter, subtitleGraph, pngSize, bannerColour } from "../server/routes/media.ts";
+import { joinGraph, staleSessions } from "../server/routes/render.ts";
 import { check, done } from "./harness.mjs";
 
 /* ---------- colour ---------- */
@@ -56,6 +57,42 @@ import { check, done } from "./harness.mjs";
   check("banner colour: nothing said", bannerColour(" h264, yuv420p, 64x64").matrix === undefined);
 }
 
+/* ---------- joining parts ---------- */
+
+{
+  const card = { width: 1080, height: 1920, colour: { matrix: "bt709", range: "tv" } };
+  const oldCard = { width: 1080, height: 1920, colour: { matrix: "bt470bg", range: "tv" } };
+  const phone = { width: 1080, height: 1920, colour: {} };
+  const graph = joinGraph([oldCard, phone, card], { 2: 3 }, 1080, 1920, false);
+  const chain = (label) => graph.split(";").find((c) => c.startsWith(label)) || "";
+  check("each part's picture is converted from its own matrix", chain("[0:v]").includes("in_color_matrix=bt470") && chain("[1:v]").includes("in_color_matrix=bt709"), graph);
+  check("every part comes out BT.709 and labelled so", [0, 1, 2].every((i) => chain(`[${i}:v]`).includes("out_color_matrix=bt709") && chain(`[${i}:v]`).endsWith(`${TAG_BT709}[v${i}]`)), graph);
+  check("a late or holed sound track is padded before concat", [0, 1].every((i) => chain(`[${i}:a]`).includes("aresample=48000:async=1:first_pts=0")), graph);
+  check("a part without sound takes its silence input", chain("[3:a]").endsWith("[a2]") && !graph.includes("[2:a]"), graph);
+  check("the parts are joined in order", graph.endsWith("[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[v][a]"), graph);
+  const unknown = joinGraph([{ width: 0, height: 0, colour: {} }, card], {}, 1080, 1920, false);
+  check("a part of unknown size goes by its own tag", unknown.includes("[0:v]scale=1080:1920:in_color_matrix=auto"), unknown);
+  const hlg = { width: 1280, height: 720, colour: { matrix: "bt2020nc", primaries: "bt2020", transfer: "arib-std-b67", range: "tv" } };
+  const hdr = joinGraph([card, hlg], {}, 1080, 1920, true);
+  check("an HDR part is tone-mapped before it is fitted", /\[1:v\]zscale=[^;]*tonemap=[^;]*scale=1080:1920:in_color_matrix=bt709/.test(hdr), hdr);
+}
+
+/* ---------- render sessions ---------- */
+
+{
+  const idle = 31 * 60 * 1000;
+  const now = 10 * idle;
+  const sessions = new Map([
+    ["fresh", { dir: "a", frames: 1, touchedAt: now - 1000 }],
+    ["abandoned", { dir: "b", frames: 1, touchedAt: now - idle }],
+    ["muxing", { dir: "c", frames: 1, touchedAt: now - idle, busy: true }],
+  ]);
+  const stale = staleSessions(sessions, now);
+  check("an abandoned session is swept", stale.includes("abandoned"), stale.join());
+  check("a session being muxed is never swept, however long it takes", !stale.includes("muxing"), stale.join());
+  check("a session in use is kept", !stale.includes("fresh"), stale.join());
+}
+
 /* ---------- PNG header ---------- */
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "leen-test-"));
@@ -86,7 +123,12 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "leen-test-"));
 
 check("phone video extensions are kept", [".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".3gp"].every((e) => videoExtension(`clip${e.toUpperCase()}`) === e));
 check("a playlist extension is dropped", videoExtension("x.m3u8") === "" && videoExtension("x.ffconcat") === "" && videoExtension(undefined) === "");
-check("ffmpeg is told which containers to accept", only(VIDEO_FORMATS)[0] === "-format_whitelist" && /matroska/.test(VIDEO_FORMATS) && !/hls|concat/.test(VIDEO_FORMATS));
+check("ffmpeg is told which containers to accept", only(VIDEO_FORMATS)[0] === "-format_whitelist" && /matroska/.test(VIDEO_FORMATS));
+{
+  const allowed = VIDEO_FORMATS.split(",");
+  check("phone and camera containers are allowed", ["mov", "mp4", "3gp", "matroska", "webm", "avi", "mpegts"].every((f) => allowed.includes(f)), VIDEO_FORMATS);
+  check("formats that read other files are not", ["hls", "applehttp", "concat", "dash", "image2", "tee", "data"].every((f) => !allowed.includes(f)), VIDEO_FORMATS);
+}
 check("too large is a 413", uploadProblem(new multer.MulterError("LIMIT_FILE_SIZE", "cue"))?.status === 413);
 check("other errors are not upload problems", uploadProblem(new Error("x")) === null);
 

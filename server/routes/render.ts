@@ -3,17 +3,17 @@
  * the audio mixdown.
  */
 
-import type { Express } from "express";
+import type { Express, Response } from "express";
 import multer from "multer";
 import fs from "fs";
 import os from "os";
 import path from "path";
 import { FFMPEG_MISSING, abortOnClose, ffmpeg, hasFfmpeg, isAborted } from "../ffmpeg";
-import { BT709_OUTPUT, TAG_BT709, toBt709 } from "../color";
+import { BT709_OUTPUT, TAG_BT709, hasToneMapping, hdrToSdr, isHdr, toBt709 } from "../color";
 import { GB, MB, VIDEO_FORMATS, WAV_FORMATS, asyncRoute, only, receive } from "../uploads";
-import { probeMedia } from "./media";
+import { probeMedia, type MediaInfo } from "./media";
 
-interface RenderSession {
+export interface RenderSession {
   dir: string;
   touchedAt: number;
   frames: number;
@@ -30,6 +30,14 @@ const SESSION_IDLE_MS = 30 * 60 * 1000;
 const MAX_FRAMES = 1_000_000;
 
 /**
+ * Renders open at once. The app makes one video at a time; a session the
+ * browser abandoned without /abort lingers until the sweeper takes it, so
+ * this leaves plenty of room for those and still stops a runaway client
+ * from opening folders without end.
+ */
+const MAX_SESSIONS = 64;
+
+/**
  * Removes in the background, retrying for Windows, where a file ffmpeg has
  * just closed can stay locked for a moment. Never throws: a leftover temp
  * file is not worth a crashed server.
@@ -41,12 +49,23 @@ function remove(target: string | undefined, recursive = false) {
   });
 }
 
+/**
+ * The sessions to sweep at `now`: untouched for too long, and not being
+ * muxed — a long mux can outlast the idle limit, and its frames are in use.
+ */
+export function staleSessions(sessions: Iterable<[string, RenderSession]>, now: number): string[] {
+  const stale: string[] = [];
+  for (const [id, session] of sessions) {
+    if (!session.busy && now - session.touchedAt > SESSION_IDLE_MS) stale.push(id);
+  }
+  return stale;
+}
+
 setInterval(() => {
+  // Nothing may escape a timer: an exception here would end the server.
   try {
-    const now = Date.now();
-    for (const [id, session] of renderSessions) {
-      // A long mux can outlast the idle limit; its frames are in use.
-      if (session.busy || now - session.touchedAt <= SESSION_IDLE_MS) continue;
+    for (const id of staleSessions(renderSessions, Date.now())) {
+      const session = renderSessions.get(id)!;
       renderSessions.delete(id);
       remove(session.dir, true);
       console.warn(`Swept render session ${id} after ${SESSION_IDLE_MS / 60000} idle minutes`);
@@ -71,17 +90,66 @@ const audioUpload = multer({ dest: os.tmpdir(), limits: { fileSize: 2 * GB, file
 const partsUpload = multer({ dest: os.tmpdir(), limits: { fileSize: 8 * GB, files: 8, fields: 16 } });
 
 /**
+ * Aborts when the browser goes away before the answer is sent, so the ffmpeg
+ * for it stops. A hang-up that came while multer was still storing the
+ * upload has already fired 'close' before the route runs; that counts too.
+ */
+function browserGone(res: Response): AbortSignal {
+  const signal = abortOnClose(res);
+  return res.destroyed ? AbortSignal.abort() : signal;
+}
+
+/**
  * Card renders (canvas frames, JPEG) are BT.601 full range like every JPEG.
  * They are converted to BT.709 so the card matches the subtitled video it
  * is joined to; see server/color.ts.
  */
 const JPEG_TO_BT709 = `scale=${toBt709({ matrix: "bt470bg", range: "pc" })},format=yuv420p,${TAG_BT709}`;
 
+/**
+ * The graph that joins the parts: each picture converted to BT.709 (and
+ * tone-mapped first if it is HDR), fitted into the frame at 30fps, each sound
+ * brought to 48kHz stereo, then all of it end to end as [v] and [a].
+ * `silentIndex` gives, for a part with no sound, the input holding its silence.
+ */
+export function joinGraph(
+  infos: Pick<MediaInfo, "width" | "height" | "colour">[],
+  silentIndex: Record<number, number>,
+  width: number,
+  height: number,
+  toneMapping: boolean
+): string {
+  const chains: string[] = [];
+  const pairs: string[] = [];
+  infos.forEach((info, i) => {
+    // Each part converted and labelled; otherwise the encoder takes the first
+    // part's labels for the whole file, and every colour after a title card
+    // (BT.601, like every JPEG) would shift.
+    const hdr = hdrToSdr(info.colour, toneMapping);
+    const size = info.width && info.height ? info : undefined;
+    const matrix = hdr ? toBt709({ matrix: "bt709", range: "tv" }) : toBt709(info.colour, size);
+    chains.push(
+      `[${i}:v]${hdr ? `${hdr},` : ""}scale=${width}:${height}:${matrix}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p,${TAG_BT709}[v${i}]`
+    );
+    const audioIn = i in silentIndex ? `[${silentIndex[i]}:a]` : `[${i}:a]`;
+    // concat does not pad the start of a part: a sound track that starts
+    // late, or has a hole, is filled with silence here, or everything after
+    // it would play early against the picture.
+    chains.push(`${audioIn}aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`);
+    pairs.push(`[v${i}][a${i}]`);
+  });
+  chains.push(`${pairs.join("")}concat=n=${infos.length}:v=1:a=1[v][a]`);
+  return chains.join(";");
+}
+
 export function registerRenderRoutes(app: Express) {
 
   app.post("/api/render/start", asyncRoute(async (_req, res): Promise<any> => {
     if (!(await hasFfmpeg())) {
       return res.status(503).json({ error: FFMPEG_MISSING });
+    }
+    if (renderSessions.size >= MAX_SESSIONS) {
+      return res.status(503).json({ error: "Too many videos are being made at once. Wait for one to finish and try again." });
     }
     const sessionId = `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), `leen-ku-${sessionId}-`));
@@ -148,7 +216,7 @@ export function registerRenderRoutes(app: Express) {
 
     // The browser closing the tab stops the mux; ffmpeg() settles only once
     // the process has exited, so the cleanup never pulls files from under it.
-    const signal = abortOnClose(res);
+    const signal = browserGone(res);
     const fps = Math.min(120, Math.max(1, Number(req.body?.fps) || 30));
     const started = Date.now();
     let sending = false;
@@ -216,7 +284,7 @@ export function registerRenderRoutes(app: Express) {
       remove(outputPath);
     };
     // Cancelling in the app aborts this request: the encode stops with it.
-    const signal = abortOnClose(res);
+    const signal = browserGone(res);
     let sending = false;
 
     try {
@@ -237,7 +305,7 @@ export function registerRenderRoutes(app: Express) {
       if (signal.aborted) return;
       const failed = probes.find((p): p is PromiseRejectedResult => p.status === "rejected");
       if (failed) throw failed.reason;
-      const infos = probes.map((p) => (p as PromiseFulfilledResult<Awaited<ReturnType<typeof probeMedia>>>).value);
+      const infos = probes.map((p) => (p as PromiseFulfilledResult<MediaInfo>).value);
       if (infos.some((info) => !info.hasVideo)) {
         return res.status(400).json({ error: "One of the parts is not a video this app can read." });
       }
@@ -252,24 +320,12 @@ export function registerRenderRoutes(app: Express) {
           args.push("-f", "lavfi", "-t", String(Math.max(0.1, info.durationSeconds || 0.1)), "-i", "anullsrc=r=48000:cl=stereo");
         }
       });
-      const chains: string[] = [];
-      const pairs: string[] = [];
-      infos.forEach((info, i) => {
-        // Each part converted to BT.709 and labelled so; otherwise the encoder
-        // takes the first part's labels for the whole file.
-        chains.push(
-          `[${i}:v]scale=${width}:${height}:${toBt709(info.colour, info)}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p,${TAG_BT709}[v${i}]`
-        );
-        const audioIn = i in silentIndex ? `[${silentIndex[i]}:a]` : `[${i}:a]`;
-        // concat does not pad the start of a part: a sound track that starts
-        // late, or has a hole, is filled with silence here, or everything
-        // after it would play early against the picture.
-        chains.push(`${audioIn}aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`);
-        pairs.push(`[v${i}][a${i}]`);
-      });
-      chains.push(`${pairs.join("")}concat=n=${files.length}:v=1:a=1[v][a]`);
+      // The app's own parts are already SDR; an HDR one would have to be
+      // tone-mapped like a source video is, or it would look washed out.
+      const toneMapping = infos.some((info) => isHdr(info.colour)) && (await hasToneMapping());
+      if (signal.aborted) return;
       args.push(
-        "-filter_complex", chains.join(";"),
+        "-filter_complex", joinGraph(infos, silentIndex, width, height, toneMapping),
         "-map", "[v]",
         "-map", "[a]",
         "-c:v", "libx264",

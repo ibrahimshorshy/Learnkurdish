@@ -41,6 +41,7 @@ import AutoTextarea from "./AutoTextarea";
 interface Props {
   project: Project;
   settings: AppSettings;
+  /** Writes into this project, even when called after another one was opened. */
   update: (patch: Partial<Project> | ((p: Project) => Partial<Project>)) => void;
 }
 
@@ -204,6 +205,26 @@ function CardBlock({
       }));
     });
 
+  /* ---------- one clip per language, whichever way it was made ---------- */
+
+  /**
+   * Each language keeps one clip. Switching between "AI voice" and "My voice"
+   * keeps it, but making one the other way replaces it — so a recording is
+   * never swapped for an AI voice (or a paid AI clip for a recording) without
+   * asking. Returns the languages that may be replaced.
+   */
+  const mayReplace = (ids: string[], with_: CardClip["source"]): string[] => {
+    const other = ids.filter((id) => card.clips[id] && card.clips[id].source !== with_);
+    if (!other.length) return ids;
+    const names = languagesLabel(other);
+    const ok = window.confirm(
+      with_ === "ai"
+        ? `You recorded your own voice for the ${copy.title.toLowerCase()} in ${names}. An AI voice would replace that recording.\n\nOK replaces it; Cancel keeps your recording.`
+        : `The ${copy.title.toLowerCase()} has an AI voice in ${names}. Your recording would replace it.\n\nOK replaces it; Cancel keeps the AI voice.`
+    );
+    return ok ? ids : ids.filter((id) => !other.includes(id));
+  };
+
   /* ---------- AI voice ---------- */
 
   const makeVoice = async (id: string) => {
@@ -230,10 +251,11 @@ function CardBlock({
   >;
   const allReady = audiences.every((id) => statuses[id] === "ready");
 
-  const makeAll = () =>
-    run("all", async () => {
-      // Only what is missing or out of date, unless everything is fine — then all of it again.
-      const targets = allReady ? audiences : audiences.filter((id) => statuses[id] !== "ready");
+  const makeAll = () => {
+    // Only what is missing or out of date, unless everything is fine — then all of it again.
+    const targets = mayReplace(allReady ? audiences : audiences.filter((id) => statuses[id] !== "ready"), "ai");
+    if (!targets.length) return;
+    return run("all", async () => {
       for (const id of targets) {
         setBusy((b) => ({ ...b, [`tts:${id}`]: true }));
         try {
@@ -243,6 +265,12 @@ function CardBlock({
         }
       }
     });
+  };
+
+  const makeOne = (id: string) => {
+    if (!mayReplace([id], "ai").length) return;
+    void run(`tts:${id}`, () => makeVoice(id));
+  };
 
   /* ---------- your voice ---------- */
 
@@ -266,6 +294,8 @@ function CardBlock({
       if (blob && blob.size) await acceptSound(id, blob);
       return;
     }
+    // Asked before recording, not after: the answer decides whether to record.
+    if (!mayReplace([id], "recorded").length) return;
     setError(null);
     await shared.startRecording(recordKey(id));
   };
@@ -370,6 +400,7 @@ function CardBlock({
               const status = statuses[id];
               const clip = card.clips[id];
               const ownClip = clip && status !== "other-source" ? clip : undefined;
+              const otherClip = clip && status === "other-source" ? clip : undefined;
               const playKey = `${which}:${id}`;
               const playing = shared.playingKey === playKey;
               const ttsBusy = Boolean(busy[`tts:${id}`]);
@@ -384,6 +415,7 @@ function CardBlock({
                         audio={card.audio}
                         status={status}
                         clip={ownClip}
+                        otherClip={otherClip}
                         voice={card.voice}
                         recording={recording ? shared.recorder.elapsed : null}
                       />
@@ -415,7 +447,7 @@ function CardBlock({
                           type="button"
                           className={`btn ${status === "new-words" || status === "new-voice" ? "btn-primary" : "btn-ghost"} !py-1 !px-2.5 text-xs`}
                           disabled={anyBusy}
-                          onClick={() => run(`tts:${id}`, () => makeVoice(id))}
+                          onClick={() => makeOne(id)}
                         >
                           {ttsBusy ? (
                             <Loader2 size={14} className="animate-spin" />
@@ -526,7 +558,7 @@ function CardBlock({
               const file = e.target.files?.[0];
               e.target.value = "";
               const id = uploadFor.current;
-              if (file && id) void acceptSound(id, file);
+              if (file && id && mayReplace([id], "recorded").length) void acceptSound(id, file);
             }}
           />
         </>
@@ -540,21 +572,33 @@ function StatusNote({
   audio,
   status,
   clip,
+  otherClip,
   voice,
   recording,
 }: {
   audio: CardAudioMode;
   status: ClipStatus;
   clip?: CardClip;
+  /** A clip made the other way, kept but not used in this mode. */
+  otherClip?: CardClip;
   voice: string;
   /** Seconds recorded so far, while recording. */
   recording: number | null;
 }) {
   if (recording !== null) return <span className="text-xs text-kurd-red font-semibold">● Recording {formatTime(recording, 0)}</span>;
   if (!clip || status === "missing" || status === "other-source") {
+    const none = audio === "ai" ? "No voice yet — silent in this language" : "Not recorded yet";
+    if (!otherClip) return <span className="text-xs text-paper/45">{none}</span>;
     return (
-      <span className="text-xs text-paper/45">
-        {audio === "ai" ? "No voice yet — silent in this language" : "Not recorded yet"}
+      <span
+        className="text-xs text-paper/45 text-right"
+        title="Each language keeps one clip. Making one the other way replaces this one — you are asked first."
+      >
+        {audio === "ai" ? "No AI voice yet" : "Not recorded yet"} ·{" "}
+        <span className="text-paper/70">
+          {otherClip.source === "recorded" ? "your recording" : "an AI voice"} ({otherClip.durationSeconds.toFixed(1)}s) is kept for “
+          {otherClip.source === "recorded" ? "My voice" : "AI voice"}”
+        </span>
       </span>
     );
   }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AudioFxSettings, Project } from "../types";
+import type { AudioFxSettings, LessonLine, Project } from "../types";
 import { analyzeSpeech, type SpeechAnalysis } from "../render/audioAlign";
 import { audioContext, decodeAudio, levellingGain, stopPlayback, toMono } from "./audioTools";
 import type { AudioSources } from "./clipBuilder";
@@ -68,7 +68,8 @@ function useDecoded(blob: Blob | undefined): { audio: RecordingAudio | null; err
   return { audio: state.audio, error: state.error };
 }
 
-type Update = (patch: Partial<Project> | ((p: Project) => Partial<Project>)) => void;
+/** Writes into the project with that id, whether or not it is still the open one. */
+type WriteProject = (projectId: string, patch: Partial<Project> | ((p: Project) => Partial<Project>)) => unknown;
 
 export interface LessonAudio {
   /** The main recording as recorded — what the waveform shows. */
@@ -91,6 +92,8 @@ export interface LessonAudio {
 interface Job {
   /** Stable for the same source and settings, so a failure is not retried in a loop. */
   id: string;
+  /** The project it is made for: the result is stored there, even if another one is open by then. */
+  projectId: string;
   label: string;
   source: Blob;
   key: string;
@@ -111,6 +114,7 @@ function wantedJobs(project: Project | null): (Job & { stored: boolean })[] {
   if (key && project.recording) {
     jobs.push({
       id: `main|${key}`,
+      projectId: project.id,
       label: project.kind === "video" ? "the video's sound" : "your recording",
       source: project.recording.blob,
       key,
@@ -124,6 +128,7 @@ function wantedJobs(project: Project | null): (Job & { stored: boolean })[] {
     if (!tk) return;
     jobs.push({
       id: `take|${line.take.id}|${tk}`,
+      projectId: project.id,
       label: `the new take for line ${index + 1}`,
       source: line.take.blob,
       key: tk,
@@ -161,15 +166,15 @@ function useStableEntries<T extends { id: string; blob: Blob }>(entries: T[]): T
  *
  * With a preset other than "raw", the cleaned-up versions are made in the
  * background — debounced, one file at a time, main recording first — and
- * stored in the project through `update` (project.processed,
- * line.take.processed). Without `update` they are still made and used, just
- * not saved.
+ * stored through `write` (project.processed, line.take.processed) in the
+ * project each was made for. Without `write` they are still made and used,
+ * just not saved.
  *
  * A cleaned file is used only when it was made with the current settings;
  * until the right one exists, the raw audio is used, so what you hear is
  * always either the recording as made or exactly what the preset gives.
  */
-export function useLessonAudio(project: Project | null, update?: Update): LessonAudio {
+export function useLessonAudio(project: Project | null, write?: WriteProject): LessonAudio {
   const raw = useDecoded(project?.recording?.blob);
 
   // Bumped whenever a result lands in memory, so the choices below are re-read.
@@ -235,8 +240,8 @@ export function useLessonAudio(project: Project | null, update?: Update): Lesson
 
   const projectRef = useRef(project);
   projectRef.current = project;
-  const updateRef = useRef(update);
-  updateRef.current = update;
+  const writeRef = useRef(write);
+  writeRef.current = write;
   const failedRef = useRef(failed);
   failedRef.current = failed;
 
@@ -244,27 +249,28 @@ export function useLessonAudio(project: Project | null, update?: Update): Lesson
   const currentRef = useRef<{ id: string; controller: AbortController } | null>(null);
   const [running, setRunning] = useState<AudioProcessingStatus | null>(null);
 
-  const pending = pendingJobs(project, failed, Boolean(update));
+  const pending = pendingJobs(project, failed, Boolean(write));
   const signature = pending.map((j) => j.id).join(",");
   const wantedIds = wantedJobs(project).map((j) => j.id).join(",");
 
-  /** Stores a finished file in the project, if it still matches the project's settings. */
+  /**
+   * Stores a finished file in the project it was made for, if that project
+   * still has the same audio and settings. The key holds the audio's size and
+   * length, so the check also works on a saved copy, whose Blobs are new ones.
+   */
   const store = useCallback((job: Job, blob: Blob) => {
-    const save = updateRef.current;
-    const current = projectRef.current;
-    if (!save || !current) return;
+    const save = writeRef.current;
+    if (!save) return;
     if (job.takeId) {
-      if (!current.lines.some((l) => l.take?.id === job.takeId && l.take.blob === job.source)) return;
-      save((p) => ({
-        lines: p.lines.map((l) =>
-          l.take?.id === job.takeId && l.take.blob === job.source && takeKey(p.audioFx, l.take) === job.key
-            ? { ...l, take: { ...l.take, processed: { key: job.key, blob } } }
-            : l
-        ),
-      }));
+      save(job.projectId, (p) => {
+        const matches = (l: LessonLine) => l.take?.id === job.takeId && takeKey(p.audioFx, l.take) === job.key;
+        if (!p.lines.some(matches)) return {};
+        return {
+          lines: p.lines.map((l) => (matches(l) && l.take ? { ...l, take: { ...l.take, processed: { key: job.key, blob } } } : l)),
+        };
+      });
     } else {
-      if (current.recording?.blob !== job.source) return;
-      save((p) => (p.recording?.blob === job.source && mainKey(p) === job.key ? { processed: { key: job.key, blob } } : {}));
+      save(job.projectId, (p) => (mainKey(p) === job.key ? { processed: { key: job.key, blob } } : {}));
     }
   }, []);
 
@@ -286,7 +292,7 @@ export function useLessonAudio(project: Project | null, update?: Update): Lesson
     const tried: Record<string, true> = {};
     try {
       for (;;) {
-        const canStore = Boolean(updateRef.current);
+        const canStore = Boolean(writeRef.current);
         const queue = pendingJobs(projectRef.current, { ...failedRef.current, ...tried }, canStore);
         const job = queue[0];
         if (!job) break;

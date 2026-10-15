@@ -7,6 +7,7 @@
 import {
   subtractRanges,
   pauseTrims,
+  pauseTrimsAcrossCuts,
   linePieces,
   lineDuration,
   piecesDuration,
@@ -111,10 +112,93 @@ check("subtract: slivers under 5ms are dropped", eq(subtractRanges(1, 3, [{ star
   const ttp = linePieces(withTake, takeSrc, tt);
   check("pieces: a take is tightened by its own pauses", eq(ttp, [{ start: 0.4, end: 1.8 }, { start: 2.7, end: 5.5 }]), show(ttp));
 
+  const tct = project("lesson", { cuts: [{ start: 1.6, end: 2.9 }], audioFx: { tightenPauses: true, maxPause: 0.6 } });
+  const tctp = linePieces(withTake, takeSrc, tct);
+  check("pieces: a tightened take still ignores the main recording's cuts", eq(tctp, [{ start: 0.4, end: 1.8 }, { start: 2.7, end: 5.5 }]), show(tctp));
+
   const sources = { main: src, takes: new Map([["t1", takeSrc]]) };
   check("duration: uses the take when the line has one", near(lineDuration(withTake, sources, tc), 5.1, 1e-6));
   check("duration: falls back to the marked length while audio loads", near(lineDuration(withTake, { main: null, takes: new Map() }, tc), 5.1, 1e-6));
   check("duration: main recording line", near(lineDuration(L, sources, plain), 3.6, 1e-6));
+}
+
+/* ---------------- tightening across cuts ---------------- */
+
+{
+  // Cutting an "um" out of a pause joins the silence either side of it into one pause.
+  const tighten = (cuts) => project("lesson", { cuts, audioFx: { tightenPauses: true, maxPause: 0.45 } });
+  const L = line(0, 6);
+  const withUm = source([{ start: 0, end: 2 }, { start: 2.8, end: 3.1 }, { start: 3.9, end: 6 }]);
+  const before = linePieces(L, withUm, tighten([]));
+  const after = linePieces(L, withUm, tighten([{ start: 2.75, end: 3.15 }]));
+  check("across cuts: the um cut out, the pause around it is one pause, trimmed to the limit", eq(after, [{ start: 0, end: 2.225 }, { start: 3.675, end: 6 }]), show(after));
+  check("across cuts: cutting the um makes the line shorter, not longer", piecesDuration(after) < piecesDuration(before), `${piecesDuration(before)} → ${piecesDuration(after)}`);
+
+  // A cut in plain silence changes nothing once the pause is tightened.
+  const plain = source([{ start: 0, end: 2 }, { start: 3.9, end: 6 }]);
+  const plainCut = linePieces(L, plain, tighten([{ start: 2.75, end: 3.15 }]));
+  check(
+    "across cuts: a cut inside a long pause gives the same line as no cut",
+    eq(plainCut, linePieces(L, plain, tighten([]))) && near(piecesDuration(plainCut), 4.538, 1e-9),
+    show(plainCut)
+  );
+
+  // A cut that takes the end of a word and some of the pause: what is left of the pause is measured.
+  const clipped = linePieces(line(0, 5), source([{ start: 0, end: 2 }, { start: 3, end: 5 }]), tighten([{ start: 1.8, end: 2.5 }]));
+  check(
+    "across cuts: a cut over a word's end leaves at most the limit of silence",
+    eq(clipped, [{ start: 0, end: 1.8 }, { start: 2.5, end: 2.725 }, { start: 2.775, end: 5 }]),
+    show(clipped)
+  );
+
+  // Under the limit once the cut is out: left alone.
+  const short = project("lesson", { cuts: [{ start: 2.45, end: 2.65 }], audioFx: { tightenPauses: true, maxPause: 0.8 } });
+  const sp = linePieces(line(0, 5), source([{ start: 0, end: 2 }, { start: 2.5, end: 2.6 }, { start: 3, end: 5 }]), short);
+  check("across cuts: a pause within the limit after the cut is not trimmed", eq(sp, [{ start: 0, end: 2.45 }, { start: 2.65, end: 5 }]), show(sp));
+
+  // A cut in the middle of continuous speech makes no pause to trim.
+  const words = linePieces(line(0, 4), source([{ start: 0.2, end: 3.8 }]), tighten([{ start: 1.5, end: 2.5 }]));
+  check("across cuts: a cut inside a word is only the cut", eq(words, [{ start: 0, end: 1.5 }, { start: 2.5, end: 4 }]), show(words));
+
+  // Several cuts in one pause.
+  const many = linePieces(L, plain, tighten([{ start: 2.3, end: 2.5 }, { start: 3.0, end: 3.2 }, { start: 3.6, end: 3.7 }]));
+  // 0.225s kept after the first word; before the second, the 0.2s after the last cut and 0.025s before it.
+  check(
+    "across cuts: several cuts in one pause still leave the limit",
+    eq(many, [{ start: 0, end: 2.225 }, { start: 3.575, end: 3.6 }, { start: 3.7, end: 6 }]),
+    show(many)
+  );
+  const nearEdge = linePieces(L, plain, tighten([{ start: 2.1, end: 2.4 }]));
+  check(
+    "across cuts: a cut right after the word, the half-pause kept is sound after the cut",
+    eq(nearEdge, [{ start: 0, end: 2.1 }, { start: 2.4, end: 2.525 }, { start: 3.675, end: 6 }]),
+    show(nearEdge)
+  );
+
+  // Without cuts the trims are exactly what pauseTrims gives on the whole line.
+  let same = true;
+  let seed = 7;
+  const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  for (let n = 0; n < 200 && same; n++) {
+    const segs = [];
+    let t = rand();
+    for (let k = 0; k < 6; k++) {
+      const s = t + rand() * 1.2;
+      const e = s + 0.05 + rand();
+      segs.push({ start: s, end: e });
+      t = e;
+    }
+    const a = rand() * 2;
+    const b = a + 1 + rand() * 6;
+    const max = rand();
+    const now = subtractRanges(a, b, pauseTrimsAcrossCuts(a, b, segs, [], max));
+    const old = subtractRanges(a, b, pauseTrims([{ start: a, end: b }], segs, max));
+    same = eq(now, old, 1e-12);
+  }
+  check("across cuts: with no cuts, exactly the old pieces", same);
+
+  const video = project("video", { cuts: [{ start: 2.75, end: 3.15 }], audioFx: { tightenPauses: true, maxPause: 0.45 } });
+  check("across cuts: a video project still never cuts or tightens", eq(linePieces(L, withUm, video), [{ start: 0, end: 6 }]));
 }
 
 /* ---------------- piecesDuration ---------------- */

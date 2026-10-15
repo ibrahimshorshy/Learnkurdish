@@ -27,8 +27,12 @@ export const GB = 1024 * MB;
 /* Formats ffmpeg may open                                              */
 /* ------------------------------------------------------------------ */
 
-/** Phone and camera videos: MP4/MOV/M4V/3GP (one demuxer), MKV/WebM, AVI. */
-export const VIDEO_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi";
+/**
+ * Phone and camera videos: MP4/MOV/M4V/3GP (one demuxer), MKV/WebM, AVI,
+ * and the older camera and PC formats the app also takes when dropped on it
+ * (a camcorder's .mts, .mpg, .wmv, .flv). None of these reads other files.
+ */
+export const VIDEO_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,mpeg,asf,flv";
 /** The browser's WAV encoder output. */
 export const WAV_FORMATS = "wav";
 /** A single PNG, whichever of the two image readers ffmpeg picks for it. */

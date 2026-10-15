@@ -1,13 +1,15 @@
 /**
  * The arithmetic behind the story video, kept apart from the drawing so it can
  * be tested without a browser: which sentences make a paragraph, how a long
- * paragraph is cut into pages, the extra breath between paragraphs, and when
- * each page is on screen.
+ * paragraph is cut into pages, the extra breath between paragraphs, when
+ * each page is on screen, and where each word goes when a line mixes
+ * right-to-left and left-to-right text.
  *
  * Pure: imported by ./renderStory and the tests.
  */
 
 import type { Timeline, TimelineEvent } from "./timeline";
+import { firstStrongDirection, type TextDirection } from "./textLayout";
 
 /**
  * Groups consecutive lines that share a paragraph number. The numbers need not
@@ -202,4 +204,171 @@ export function wordsSpoken(starts: number[] | null | undefined, local: number):
   let count = 0;
   while (count < starts.length && starts[count] <= local) count++;
   return count;
+}
+
+/* ------------------------------------------------------------------ */
+/* Mixed directions                                                     */
+/* ------------------------------------------------------------------ */
+
+/** Digits a number reads left to right with after a left-to-right word, inside right-to-left text. */
+const EUROPEAN_DIGIT = /[0-9۰-۹]/;
+const ANY_DIGIT = /\p{Nd}/u;
+/** What a word is made of, as against the punctuation around it. */
+const WORD_CHAR = /[\p{L}\p{N}\p{M}]/u;
+
+/**
+ * Which way each word reads in a block that reads `base`: the part of the
+ * Unicode bidi algorithm that works across words, which the story video has
+ * to do itself because it draws every word on its own.
+ *
+ * A word with a letter reads the way its first letter does. A word without
+ * one (a number, a dash) goes with the words either side when they agree, and
+ * a number straight after a word of the other direction goes with that word,
+ * so "Rowling 1997" stays together inside Kurdish. Anything else reads with
+ * the block. Words of different `groups` (sentences) never affect each other:
+ * each sentence is lit on its own, so each is a unit of its own.
+ */
+export function wordDirections(words: string[], base: TextDirection, groups?: number[]): TextDirection[] {
+  const own = words.map((w) => firstStrongDirection(w));
+  const group = (i: number) => groups?.[i] ?? 0;
+  const digit = base === "rtl" ? EUROPEAN_DIGIT : ANY_DIGIT;
+  return words.map((word, i) => {
+    const mine = own[i];
+    if (mine) return mine;
+    let before: TextDirection = base;
+    for (let j = i - 1; j >= 0 && group(j) === group(i); j--) {
+      const d = own[j];
+      if (d) {
+        before = d;
+        break;
+      }
+    }
+    let after: TextDirection = base;
+    for (let j = i + 1; j < words.length && group(j) === group(i); j++) {
+      const d = own[j];
+      if (d) {
+        after = d;
+        break;
+      }
+    }
+    if (before === after) return before;
+    if (before !== base && digit.test(word)) return before;
+    return base;
+  });
+}
+
+/** A word of one text line, with the box it was given in reading order. */
+export interface WordBox {
+  text: string;
+  left: number;
+  right: number;
+  /** Which way it reads, from wordDirections. */
+  dir: TextDirection;
+  /** Its sentence: a run of the other direction never spans two. */
+  group: number;
+}
+
+/** Something to draw: a word, or a part of one. */
+export interface WordPiece {
+  /** The word (index into the line's words) it belongs to, for its colour. */
+  word: number;
+  text: string;
+  left: number;
+  right: number;
+  /** The direction to draw it with. */
+  dir: TextDirection;
+}
+
+/** A word's leading punctuation, the word itself, and its trailing punctuation. */
+function splitEdges(text: string): { head: string; core: string; tail: string } {
+  const chars = [...text];
+  let a = 0;
+  while (a < chars.length && !WORD_CHAR.test(chars[a])) a++;
+  if (a === chars.length) return { head: "", core: text, tail: "" };
+  let b = chars.length;
+  while (b > a && !WORD_CHAR.test(chars[b - 1])) b--;
+  return { head: chars.slice(0, a).join(""), core: chars.slice(a, b).join(""), tail: chars.slice(b).join("") };
+}
+
+/**
+ * Where to draw the words of one text line.
+ *
+ * Each word comes with a box in reading order from the block's start edge,
+ * which is right for every word that reads with the block. Two or more words
+ * in a row that read the other way (a name like "J. K. Rowling" in Kurdish, a
+ * Kurdish phrase in English) make a run: the run keeps the room its words
+ * had, but inside it they go in their own order, so it reads "J. K. Rowling"
+ * and not "Rowling K. J.". Punctuation on the run's outer ends belongs to the
+ * sentence around it ("Rowling،", "Rowling." end on the Kurdish side), so it
+ * is split off and drawn in the block's direction at the run's far ends.
+ *
+ * A word on its own is left as it is: drawn whole in the block's direction,
+ * the canvas places its punctuation the way a browser would.
+ */
+export function placeLine(words: WordBox[], base: TextDirection, measure: (text: string) => number): WordPiece[] {
+  const pieces: WordPiece[] = [];
+  let i = 0;
+  while (i < words.length) {
+    let j = i;
+    if (words[i].dir !== base) {
+      while (j + 1 < words.length && words[j + 1].dir !== base && words[j + 1].group === words[i].group) j++;
+    }
+    if (j === i) {
+      const w = words[i];
+      pieces.push({ word: i, text: w.text, left: w.left, right: w.right, dir: base });
+    } else {
+      pieces.push(...placeRun(words, i, j, base, measure));
+    }
+    i = j + 1;
+  }
+  return pieces;
+}
+
+function placeRun(words: WordBox[], first: number, last: number, base: TextDirection, measure: (text: string) => number): WordPiece[] {
+  const runDir: TextDirection = base === "rtl" ? "ltr" : "rtl";
+  const head = splitEdges(words[first].text).head;
+  const tail = splitEdges(words[last].text).tail;
+  const headWidth = head ? measure(head) : 0;
+  const tailWidth = tail ? measure(tail) : 0;
+
+  // Each word of the run without the run's outer punctuation, and its width.
+  const cores: { word: number; text: string; width: number }[] = [];
+  for (let k = first; k <= last; k++) {
+    let text = words[k].text;
+    let width = words[k].right - words[k].left;
+    if (k === first && head) {
+      text = text.slice(head.length);
+      width -= headWidth;
+    }
+    if (k === last && tail) {
+      text = text.slice(0, text.length - tail.length);
+      width -= tailWidth;
+    }
+    cores.push({ word: k, text, width: Math.max(0, width) });
+  }
+  /** The space the block left between word k and word k + 1. */
+  const gapAfter = (k: number) =>
+    Math.max(0, base === "rtl" ? words[k].left - words[k + 1].right : words[k + 1].left - words[k].right);
+
+  // Laid out from the run's left edge. In right-to-left text the run reads
+  // left to right, and what comes before it in the sentence (its head) sits
+  // on its right; in left-to-right text the run reads right to left and its
+  // head sits on its left.
+  let cursor = Math.min(...words.slice(first, last + 1).map((w) => w.left));
+  const out: WordPiece[] = [];
+  const put = (word: number, text: string, width: number, dir: TextDirection) => {
+    out.push({ word, text, left: cursor, right: cursor + width, dir });
+    cursor += width;
+  };
+
+  if (base === "rtl" && tail) put(last, tail, tailWidth, base);
+  if (base === "ltr" && head) put(first, head, headWidth, base);
+  const order = base === "rtl" ? cores : [...cores].reverse();
+  order.forEach((core, n) => {
+    put(core.word, core.text, core.width, runDir);
+    if (n + 1 < order.length) cursor += gapAfter(Math.min(core.word, order[n + 1].word));
+  });
+  if (base === "rtl" && head) put(first, head, headWidth, base);
+  if (base === "ltr" && tail) put(last, tail, tailWidth, base);
+  return out;
 }

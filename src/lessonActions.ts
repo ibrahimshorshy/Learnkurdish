@@ -8,6 +8,7 @@ import type { AppSettings } from "./utils/settings";
 import type { RecordingAudio } from "./audio/useRecordingAudio";
 import { estimateCost, type Usage } from "./config/models";
 import { placeLinesByLength, snapLinesToPauses, pausesOf } from "./audio/segmentation";
+import type { SpeechAnalysis } from "./render/audioAlign";
 import { wavForTranscription } from "./audio/audioTools";
 import { buildLineClip, type AudioSources } from "./audio/clipBuilder";
 import { newId } from "./utils/projectStore";
@@ -168,13 +169,38 @@ export async function translateLines(
 }
 
 /**
+ * Where to divide [start, end] so that `share` of it comes first: the middle
+ * of the pause nearest that point, when `analysis` has one inside the range.
+ */
+function splitPoint(start: number, end: number, share: number, analysis: SpeechAnalysis | null): number {
+  const boundary = start + (end - start) * share;
+  if (!analysis) return boundary;
+  const inside = pausesOf(analysis, 0.08).filter((p) => p.start > start && p.end < end);
+  if (!inside.length) return boundary;
+  const nearest = inside.reduce((a, b) =>
+    Math.abs((a.start + a.end) / 2 - boundary) <= Math.abs((b.start + b.end) / 2 - boundary) ? a : b
+  );
+  return (nearest.start + nearest.end) / 2;
+}
+
+/**
  * Splits a line in two at a character position. The time is split at the
  * pause nearest to the same proportion of the line, when there is one.
+ *
+ * A line with its own re-recorded take has its take split the same way, in
+ * the take's own timeline (`takeAudio` is the take, for its pauses), so each
+ * half plays only its own words. The second half gets a new take id but the
+ * same recording and the same cleaned-up version, so nothing is decoded or
+ * cleaned twice.
+ *
+ * Only the first half keeps a story's "new paragraph" mark: the second half
+ * continues the same paragraph. A dialogue line's speaker says both halves.
  */
 export function splitLine(
   line: LessonLine,
   at: number,
-  audio: RecordingAudio | null
+  audio: RecordingAudio | null,
+  takeAudio: RecordingAudio | null = null
 ): [LessonLine, LessonLine] | null {
   const text = line.kurdish;
   let cut = Math.max(0, Math.min(text.length, at));
@@ -193,34 +219,35 @@ export function splitLine(
   if (!left || !right) return null;
 
   const share = left.length / (left.length + right.length);
-  let boundary = line.start + (line.end - line.start) * share;
-  if (audio) {
-    const inside = pausesOf(audio.analysis, 0.08).filter((p) => p.start > line.start && p.end < line.end);
-    if (inside.length) {
-      const nearest = inside.reduce((a, b) =>
-        Math.abs((a.start + a.end) / 2 - boundary) <= Math.abs((b.start + b.end) / 2 - boundary) ? a : b
-      );
-      boundary = (nearest.start + nearest.end) / 2;
-    }
-  }
+  const boundary = splitPoint(line.start, line.end, share, audio?.analysis ?? null);
+  const fresh = { translations: {}, transliteration: "", translatedFrom: undefined };
+  const { paragraphStart: _paragraph, take, ...rest } = line;
 
-  return [
-    { ...line, kurdish: left, end: boundary, translations: {}, transliteration: "", translatedFrom: undefined },
-    {
-      ...line,
-      id: newId("l"),
-      kurdish: right,
-      start: boundary,
-      translations: {},
-      transliteration: "",
-      translatedFrom: undefined,
-    },
-  ];
+  const first: LessonLine = { ...line, kurdish: left, end: boundary, ...fresh };
+  const second: LessonLine = { ...rest, id: newId("l"), kurdish: right, start: boundary, ...fresh };
+  if (take) {
+    const takeBoundary = splitPoint(take.start, take.end, share, takeAudio?.analysis ?? null);
+    first.take = { ...take, end: takeBoundary };
+    second.take = { ...take, id: newId("t"), start: takeBoundary };
+  }
+  return [first, second];
 }
 
+/** Whether merging these two lines would throw away a re-recorded take (see mergeLines). */
+export function mergeDropsTakes(a: LessonLine, b: LessonLine): boolean {
+  return Boolean(a.take || b.take);
+}
+
+/**
+ * Joins a line with the one after it. A re-recorded take holds one line's
+ * words only, so the joined line cannot play it for both: it uses the main
+ * recording for the whole line, and any take is dropped. Ask first
+ * (mergeDropsTakes).
+ */
 export function mergeLines(a: LessonLine, b: LessonLine): LessonLine {
+  const { take: _take, ...rest } = a;
   return {
-    ...a,
+    ...rest,
     kurdish: `${a.kurdish.trim()} ${b.kurdish.trim()}`.trim(),
     start: Math.min(a.start, b.start),
     end: Math.max(a.end, b.end),
@@ -232,15 +259,40 @@ export function mergeLines(a: LessonLine, b: LessonLine): LessonLine {
 }
 
 /**
+ * The lines without the one at `index`. Deleting the first sentence of a
+ * story's paragraph keeps the paragraph: its mark moves to the next sentence,
+ * rather than the rest of the paragraph joining the one before.
+ */
+export function removeLine(lines: LessonLine[], index: number): LessonLine[] {
+  const carry = Boolean(lines[index]?.paragraphStart);
+  return lines.flatMap((line, i) => {
+    if (i === index) return [];
+    if (i === index + 1 && carry && !line.paragraphStart) return [{ ...line, paragraphStart: true }];
+    return [line];
+  });
+}
+
+/**
+ * Which paragraph each line is in, from 0, as the story video numbers them.
+ * A skipped line is not shown, but its "new paragraph" mark still starts one.
+ */
+export function paragraphNumbers(lines: LessonLine[]): number[] {
+  let paragraph = -1;
+  return lines.map((line, index) => {
+    if (line.paragraphStart || index === 0) paragraph++;
+    return paragraph;
+  });
+}
+
+/**
  * The lines that go into the video, each with its finished clip of your voice
  * (its take if it has one, cuts removed, pauses tightened). Lines whose audio
  * is not loaded yet are left out rather than played silent.
  */
 export function videoLinesFrom(project: Project, sources: AudioSources): VideoLine[] {
   const out: VideoLine[] = [];
-  let paragraph = -1;
+  const paragraphOf = paragraphNumbers(project.lines);
   project.lines.forEach((l, index) => {
-    if (l.paragraphStart || index === 0) paragraph++;
     if (l.skip || !l.kurdish.trim() || (!l.take && l.end <= l.start)) return;
     const clip = buildLineClip(l, sources, project);
     if (!clip) return;
@@ -251,7 +303,7 @@ export function videoLinesFrom(project: Project, sources: AudioSources): VideoLi
       translations: l.translations,
       clip,
       speaker: l.speaker ?? 0,
-      paragraph: Math.max(0, paragraph),
+      paragraph: paragraphOf[index],
     });
   });
   return out;
@@ -274,6 +326,8 @@ export function fingerprint(project: Project, languages: string[]): string {
         : ""
     ),
   ];
+  const paragraphOf = paragraphNumbers(project.lines);
+  const kept = project.lines.map((l, i) => ({ l, paragraph: paragraphOf[i] })).filter(({ l }) => !l.skip);
   const material = JSON.stringify({
     kind: project.kind,
     languages,
@@ -288,9 +342,7 @@ export function fingerprint(project: Project, languages: string[]): string {
       project.kind === "video" ? [] : project.cuts.map((c) => [Math.round(c.start * 100), Math.round(c.end * 100)]),
     fx: project.kind === "video" ? { preset: project.audioFx.preset, room: project.audioFx.room } : project.audioFx,
     processed: project.processed?.key,
-    lines: project.lines
-      .filter((l) => !l.skip)
-      .map((l) => [
+    lines: kept.map(({ l, paragraph }, i) => [
         l.kurdish,
         l.transliteration,
         languages.map((id) => l.translations[id] || ""),
@@ -298,7 +350,11 @@ export function fingerprint(project: Project, languages: string[]): string {
         Math.round(l.end * 100),
         l.take ? `${l.take.id}:${Math.round(l.take.start * 100)}:${Math.round(l.take.end * 100)}:${l.take.processed?.key ?? ""}` : "",
         l.speaker ?? 0,
-        l.paragraphStart ? 1 : 0,
+        // Whether the story starts a new paragraph here, as the video has it:
+        // a mark on a skipped line just before counts too. The first line
+        // starts the first paragraph whatever it says, so it keeps its own
+        // mark here as before, and videos made earlier keep their fingerprint.
+        i === 0 ? (l.paragraphStart ? 1 : 0) : paragraph !== kept[i - 1].paragraph ? 1 : 0,
       ]),
   });
   let hash = 5381;

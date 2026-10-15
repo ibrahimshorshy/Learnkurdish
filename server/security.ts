@@ -31,6 +31,26 @@ export function isLoopbackHost(host: string): boolean {
   return LOOPBACK_NAMES.has(host.trim().toLowerCase());
 }
 
+/**
+ * The addresses to listen on for a HOST setting, the first one required.
+ *
+ * Unset (or a loopback name): both loopbacks, because browsers and Node may
+ * resolve "localhost" to ::1 first (Windows does), and http://localhost:PORT
+ * has to keep working.
+ *
+ * Anything else turns LAN access on. The loopbacks the chosen address does not
+ * already cover are added, so this computer still reaches the app at
+ * localhost, and setup.mjs's check at 127.0.0.1 still finds it.
+ */
+export function listenHosts(setting: string): string[] {
+  const host = setting.trim().replace(/^\[(.*)\]$/, "$1");
+  if (!host || isLoopbackHost(host)) return ["127.0.0.1", "::1"];
+  // "::" takes IPv4 as well (dual stack), so it covers both loopbacks.
+  if (host === "::") return ["::"];
+  if (host === "0.0.0.0") return ["0.0.0.0", "::1"];
+  return [host, "127.0.0.1", "::1"];
+}
+
 /** The hostname and port in a Host header, normalised the way browsers write origins; null when it is not one. */
 function parseHost(hostHeader: string): URL | null {
   if (!hostHeader || /[\s/\\@?#]/.test(hostHeader)) return null;

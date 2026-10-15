@@ -102,6 +102,25 @@ function snapEnd(t: number, analysis: SpeechAnalysis, window: number): number {
 }
 
 /**
+ * How far clear of both of the model's edges a run of speech must lie for it
+ * to count as left out on purpose rather than as an edge the model misjudged.
+ */
+export const LEFT_OUT_MARGIN = 0.25;
+
+/**
+ * Whether the gap the model left between two lines holds a whole run of
+ * speech, clear of both its edges. The transcription prompts tell the model to
+ * leave out a false start, a remark or a cough (and, in a dialogue, a
+ * speaker's name read out before a line), so speech there belongs to neither
+ * line.
+ */
+function speechLeftOut(runs: SpeechSegment[], gapStart: number, gapEnd: number, floor: number): boolean {
+  const from = Math.max(floor, gapStart + LEFT_OUT_MARGIN);
+  const to = gapEnd - LEFT_OUT_MARGIN;
+  return runs.some((r) => r.start >= from && r.end <= to);
+}
+
+/**
  * Moves every boundary between two lines into the pause the model most
  * plausibly meant, then trims each line to its speech.
  *
@@ -110,6 +129,12 @@ function snapEnd(t: number, analysis: SpeechAnalysis, window: number): number {
  * and long — a sentence break is usually the longest silence nearby. A pause
  * can only be used once, and boundaries only move forward, so lines cannot
  * cross.
+ *
+ * Where the model's gap between two lines holds a whole run of speech it left
+ * out (a stumble, "sorry, again", a word to someone in the room), the two
+ * lines do not share a pause: each edge snaps to its own line's speech, and
+ * what lies between stays out of both clips instead of playing while one of
+ * them is on screen.
  */
 export function snapLinesToPauses(
   lines: TimeRange[],
@@ -123,9 +148,21 @@ export function snapLinesToPauses(
 
   const out = lines.map((l) => ({ start: l.start, end: l.end }));
   const pauses = pausesOf(analysis);
+  const runs = runsOf(analysis);
 
   let floor = 0;
   for (let i = 0; i + 1 < n; i++) {
+    if (speechLeftOut(runs, out[i].end, out[i + 1].start, floor)) {
+      // The run lies between two separate runs (runs are at least a word gap
+      // apart), so neither snapped edge can reach into it.
+      const end = Math.max(floor, snapEnd(out[i].end, analysis, window));
+      const start = Math.max(end, snapStart(out[i + 1].start, analysis, window));
+      out[i].end = end;
+      out[i + 1].start = start;
+      floor = start;
+      continue;
+    }
+
     const ideal = (out[i].end + out[i + 1].start) / 2;
     // Never reach past the far end of the following line.
     const ceiling = i + 2 < n ? out[i + 2].start : analysis.duration;

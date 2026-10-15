@@ -22,6 +22,7 @@ import { mainKey, recallProcessed } from "../audio/processing";
 import { fingerprint, outputKey } from "../lessonActions";
 import { newId } from "../utils/projectStore";
 import { downloadBlob } from "../utils/download";
+import { RENDER_IN_PROGRESS, holdLeave } from "../utils/leaveGuard";
 import { useObjectUrl } from "../utils/useObjectUrl";
 import { joinVideos, renderSubtitledVideo } from "../utils/mediaApi";
 import { loadCardsInput, prepareCardOnly } from "../render/cards";
@@ -39,6 +40,7 @@ export interface SubtitleOutputStepProps {
   logoSrc: string;
   /** The recording is still being cleaned up in the background. */
   processing?: boolean;
+  /** Writes into this project, even when called after another one was opened. */
   update: (patch: Partial<Project> | ((p: Project) => Partial<Project>)) => void;
 }
 
@@ -200,7 +202,10 @@ export default function SubtitleOutputStep({
   );
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Leaving the step cancels the render (the app asks first, while it runs).
   useEffect(() => () => abortRef.current?.abort(), []);
+  const rendering = job !== null;
+  useEffect(() => (rendering ? holdLeave(RENDER_IN_PROGRESS) : undefined), [rendering]);
 
   const outputs = v.outputs.filter((o) => o.every((id) => project.audiences.includes(id)));
   const usingCleanSound = Boolean(currentCleanup(project));

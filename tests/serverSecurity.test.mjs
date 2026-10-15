@@ -10,9 +10,14 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import http from "http";
+import { once } from "events";
 import { execFileSync } from "child_process";
-import { requestProblem, isLoopbackHost, withoutPaths, errorResponse } from "../server/security.ts";
+import express from "express";
+import { apiGuard, requestProblem, isLoopbackHost, listenHosts, withoutPaths, errorResponse } from "../server/security.ts";
 import {
+  registerAudioRoutes,
+  cancelSignal,
   inspectWav,
   cleanAudio,
   processAudioFile,
@@ -52,6 +57,18 @@ check("this computer's own name is accepted with LAN access on", ok({ host: `${o
 check(
   "HOST=localhost/127.0.0.1/::1 is not LAN access; 0.0.0.0 is",
   isLoopbackHost("localhost") && isLoopbackHost("127.0.0.1") && isLoopbackHost("::1") && !isLoopbackHost("0.0.0.0") && !isLoopbackHost("::")
+);
+
+/* ---------------- where it listens ---------------- */
+
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+check("no HOST: both loopbacks, nothing else", same(listenHosts(""), ["127.0.0.1", "::1"]) && same(listenHosts("  "), ["127.0.0.1", "::1"]));
+check("HOST=localhost or a loopback address: still loopback only", same(listenHosts("localhost"), ["127.0.0.1", "::1"]) && same(listenHosts("[::1]"), ["127.0.0.1", "::1"]));
+check("HOST=0.0.0.0 also keeps ::1, so localhost works where it means IPv6", same(listenHosts("0.0.0.0"), ["0.0.0.0", "::1"]));
+check("HOST=:: (dual stack) covers both loopbacks itself", same(listenHosts("::"), ["::"]) && same(listenHosts("[::]"), ["::"]));
+check(
+  "HOST=<one LAN address> keeps both loopbacks too, so localhost and setup.mjs's check still work",
+  same(listenHosts("192.168.1.20"), ["192.168.1.20", "127.0.0.1", "::1"])
 );
 
 /* ---------------- error text ---------------- */
@@ -198,6 +215,176 @@ if (ffmpegOk) {
   } catch (err) {
     check("ffmpeg checks ran", false, String(err?.stack || err).slice(-400));
   }
+}
+
+/* ---------------- a real server ---------------- */
+
+/*
+ * The guard and the audio route mounted as server.ts mounts them, on a port
+ * the system picks (port 0), so this never collides with a running app.
+ */
+const logged = [];
+for (const level of ["log", "warn", "error"]) {
+  const original = console[level];
+  console[level] = (...args) => {
+    logged.push(args.map(String).join(" "));
+    original(...args);
+  };
+}
+
+/** One request by hand, so Host and the moment of hanging up are ours to choose. */
+function rawRequest(port, { method = "GET", path: target = "/", headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port, method, path: target, headers, agent: false }, (res) => {
+      const parts = [];
+      res.on("data", (c) => parts.push(c));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(parts) }));
+    });
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
+function multipart(fields, fileName, fileBytes) {
+  const boundary = "----leen-test-boundary";
+  const parts = Object.entries(fields).map(
+    ([name, value]) => Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`)
+  );
+  parts.push(
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="audio"; filename="${fileName}"\r\nContent-Type: audio/wav\r\n\r\n`),
+    fileBytes,
+    Buffer.from(`\r\n--${boundary}--\r\n`)
+  );
+  const body = Buffer.concat(parts);
+  return { body, headers: { "Content-Type": `multipart/form-data; boundary=${boundary}`, "Content-Length": String(body.length) } };
+}
+
+const app = express();
+app.use("/api", apiGuard({ lan: false }));
+app.use(express.json({ limit: "5mb" }));
+app.get("/api/ping", (_req, res) => res.json({ ok: true }));
+app.post("/api/echo", (req, res) => res.json({ size: JSON.stringify(req.body).length }));
+app.get("/api/hangup", async (req, res) => {
+  // Waits for the client to leave, as a long upload still being saved would.
+  if (!req.socket.destroyed) await once(req.socket, "close");
+  hangupSignal = cancelSignal(req, res);
+});
+let hangupSignal = null;
+registerAudioRoutes(app);
+app.use((err, _req, res, next) => {
+  const { status, error } = errorResponse(err);
+  if (res.headersSent) return next(err);
+  res.status(status).json({ error });
+});
+const server = app.listen(0, "127.0.0.1");
+await once(server, "listening");
+const port = server.address().port;
+
+try {
+  const health = await fetch(`http://127.0.0.1:${port}/api/ping`);
+  check("a plain fetch with no Origin (setup.mjs's health check) gets through", health.status === 200);
+  const viaLocalhost = await rawRequest(port, { path: "/api/ping", headers: { Host: `localhost:${port}`, Origin: `http://localhost:${port}`, "Sec-Fetch-Site": "same-origin" } });
+  check("the app's own request gets through", viaLocalhost.status === 200);
+
+  const rebound = await rawRequest(port, { path: "/api/ping", headers: { Host: `attacker.example:${port}` } });
+  check(
+    "a request for another host name is refused with a 403 and a JSON reason",
+    rebound.status === 403 && /localhost/.test(JSON.parse(rebound.body.toString()).error || "")
+  );
+  const crossSite = await rawRequest(port, {
+    method: "POST",
+    path: "/api/audio/process",
+    headers: { Host: `localhost:${port}`, Origin: "http://evil.example", "Sec-Fetch-Site": "cross-site", ...multipart({ preset: "raw" }, "a.wav", Buffer.alloc(64)).headers },
+    body: multipart({ preset: "raw" }, "a.wav", Buffer.alloc(64)).body,
+  });
+  check("a cross-site upload is refused before it reaches the route", crossSite.status === 403);
+
+  const big = JSON.stringify({ lines: Array.from({ length: 100000 }, () => "ئەمە دێڕێکی کوردییە بۆ تاقیکردنەوە") });
+  const tooBig = await rawRequest(port, {
+    method: "POST",
+    path: "/api/echo",
+    headers: { Host: `localhost:${port}`, "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(big)) },
+    body: big,
+  });
+  check(
+    "a JSON body over the limit is a 413 with a plain message",
+    tooBig.status === 413 && JSON.parse(tooBig.body.toString()).error === "The request is too large.",
+    `${tooBig.status} ${Buffer.byteLength(big)} bytes`
+  );
+  const story = JSON.stringify({ lines: Array.from({ length: 3000 }, () => "ئەمە دێڕێکی کوردییە بۆ تاقیکردنەوە، کە درێژترە لە دێڕێکی ئاسایی چیرۆکێک") });
+  const fits = await rawRequest(port, {
+    method: "POST",
+    path: "/api/echo",
+    headers: { Host: `localhost:${port}`, "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(story)) },
+    body: story,
+  });
+  check("a translate request for a 3000-line story fits the JSON limit", fits.status === 200, `${fits.status}`);
+
+  // A client that hung up before the route began (its upload still being saved).
+  const gone = http.request({ host: "127.0.0.1", port, path: "/api/hangup", agent: false });
+  gone.on("error", () => {});
+  gone.end();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  gone.destroy();
+  for (let i = 0; i < 50 && !hangupSignal; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+  check("a client that left before the route began counts as cancelled from the start", hangupSignal?.aborted === true);
+
+  if (ffmpegOk) {
+    const minute = writeWav16(Float32Array.from({ length: 48000 * 60 }, (_, i) => Math.sin(i / 13) * 0.2), 48000);
+    const upload = multipart({ preset: "raw", room: "0" }, "audio.wav", minute);
+
+    // Read to the last byte and hang up at once, as curl does: that is a finished request, not a cancel.
+    logged.length = 0;
+    const full = await new Promise((resolve, reject) => {
+      const req = http.request(
+        { host: "127.0.0.1", port, method: "POST", path: "/api/audio/process", headers: { Host: `localhost:${port}`, ...upload.headers }, agent: false },
+        (res) => {
+          let got = 0;
+          const expected = Number(res.headers["content-length"]);
+          res.on("data", (c) => {
+            got += c.length;
+            if (got >= expected) {
+              req.destroy();
+              resolve({ status: res.statusCode, got, expected });
+            }
+          });
+          res.on("end", () => resolve({ status: res.statusCode, got, expected }));
+        }
+      );
+      req.on("error", reject);
+      req.end(upload.body);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    check(
+      "a full download that hangs up straight after is not logged as a cancel",
+      full.status === 200 && full.got === full.expected && full.expected === 44 + 48000 * 60 * 2 && !logged.some((l) => /stopped/.test(l)),
+      `${full.got}/${full.expected} ${logged.filter((l) => /clean-up/i.test(l)).join(" | ")}`
+    );
+
+    // Hang up after the first bytes of the answer: the rest is never made.
+    logged.length = 0;
+    await new Promise((resolve, reject) => {
+      const req = http.request(
+        { host: "127.0.0.1", port, method: "POST", path: "/api/audio/process", headers: { Host: `localhost:${port}`, ...upload.headers }, agent: false },
+        (res) => {
+          res.once("data", () => {
+            req.destroy();
+            resolve();
+          });
+        }
+      );
+      req.on("error", () => {});
+      req.end(upload.body);
+      setTimeout(() => reject(new Error("no answer")), 20000);
+    });
+    for (let i = 0; i < 50 && !logged.some((l) => /stopped/.test(l)); i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    check("a download dropped half way stops the route (and its clean-up runs)", logged.some((l) => /stopped/.test(l)), logged.join(" | "));
+  }
+} catch (err) {
+  check("server checks ran", false, String(err?.stack || err).slice(-400));
+} finally {
+  server.close();
+  server.closeAllConnections?.();
 }
 
 fs.rmSync(dir, { recursive: true, force: true });

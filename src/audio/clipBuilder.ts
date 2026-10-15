@@ -84,21 +84,89 @@ export function pauseTrims(
   return trims;
 }
 
+/** How much of [from, to] the cuts cover. `cuts` must be sorted and not overlap. */
+function cutTimeIn(from: number, to: number, cuts: TimeRange[]): number {
+  return cuts.reduce((sum, c) => sum + Math.max(0, Math.min(to, c.end) - Math.max(from, c.start)), 0);
+}
+
+/** The time `amount` seconds of kept sound after `from`, stepping over the cuts. */
+function afterKept(from: number, amount: number, cuts: TimeRange[]): number {
+  let t = from;
+  let left = amount;
+  for (const c of cuts) {
+    if (c.end <= t) continue;
+    if (c.start >= t + left) break;
+    left -= Math.max(0, c.start - t);
+    t = Math.max(t, c.end);
+  }
+  return t + left;
+}
+
+/** The time `amount` seconds of kept sound before `to`, stepping over the cuts. */
+function beforeKept(to: number, amount: number, cuts: TimeRange[]): number {
+  let t = to;
+  let left = amount;
+  for (let i = cuts.length - 1; i >= 0; i--) {
+    const c = cuts[i];
+    if (c.start >= t) continue;
+    if (c.end <= t - left) break;
+    left -= Math.max(0, t - c.end);
+    t = Math.min(t, c.start);
+  }
+  return t - left;
+}
+
+/**
+ * Like `pauseTrims` for the whole of [start, end], but measured as it will
+ * sound once `cuts` are skipped. Cutting an "um" or a cough out of a pause
+ * joins the silence before it to the silence after it, so the two are one
+ * pause: it is measured without the cut, and trimmed so that what is left is
+ * no longer than `maxPause`, half the limit next to each word. Without cuts
+ * the line comes out exactly as `pauseTrims` makes it.
+ */
+export function pauseTrimsAcrossCuts(
+  start: number,
+  end: number,
+  segments: { start: number; end: number }[],
+  cuts: TimeRange[],
+  maxPause: number
+): TimeRange[] {
+  const sorted = normalizeCuts(cuts).filter((c) => c.end > start && c.start < end);
+  // Speech that was cut is not heard, so it does not end a pause.
+  const speech = segments
+    .filter((s) => s.end > start && s.start < end)
+    .flatMap((s) => subtractRanges(s.start, s.end, sorted))
+    .sort((a, b) => a.start - b.start);
+  const keep = Math.max(0.1, maxPause) / 2;
+  const trims: TimeRange[] = [];
+  for (let i = 0; i + 1 < speech.length; i++) {
+    const gapStart = Math.max(start, speech[i].end);
+    const gapEnd = Math.min(end, speech[i + 1].start);
+    // The nanosecond allowance only stops rounding error in the cut lengths
+    // from trimming a pause that is exactly at the limit.
+    if (gapEnd - gapStart - cutTimeIn(gapStart, gapEnd, sorted) - maxPause <= 1e-9) continue;
+    const from = afterKept(gapStart, keep, sorted);
+    const to = beforeKept(gapEnd, keep, sorted);
+    if (to > from) trims.push({ start: from, end: to });
+  }
+  return trims;
+}
+
 /** The pieces of the source that make up this line, after cuts and tightening. */
 export function linePieces(line: LessonLine, source: RecordingAudio, project: Project): TimeRange[] {
   const fromTake = Boolean(line.take);
   const start = fromTake ? line.take!.start : line.start;
   const end = fromTake ? line.take!.end : line.end;
-  const editable = project.kind !== "video";
+  if (project.kind === "video") return [{ start, end }];
 
   // Cuts are marked on the main recording's timeline, so they mean nothing to a take.
-  let pieces = editable && !fromTake ? subtractRanges(start, end, project.cuts) : [{ start, end }];
-  // A take is tightened by its own pauses: `source` is the take, with its own analysis.
-  if (editable && project.audioFx.tightenPauses) {
-    const trims = pauseTrims(pieces, source.analysis.segments, project.audioFx.maxPause);
-    pieces = pieces.flatMap((p) => subtractRanges(p.start, p.end, trims));
-  }
-  return pieces;
+  const cuts = fromTake ? [] : project.cuts;
+  if (!project.audioFx.tightenPauses) return subtractRanges(start, end, cuts);
+  // Pauses are measured across the cuts, so cutting a cough out of a pause
+  // never leaves a longer pause than the limit. A take is tightened by its own
+  // pauses: `source` is the take, with its own analysis.
+  const trims = pauseTrimsAcrossCuts(start, end, source.analysis.segments, cuts, project.audioFx.maxPause);
+  return subtractRanges(start, end, [...cuts, ...trims]);
 }
 
 /** How long two pieces overlap where they are joined. */
