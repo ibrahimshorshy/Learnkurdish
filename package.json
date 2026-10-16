@@ -1,7 +1,7 @@
 {
   "name": "leen-kurdish-studio",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "description": "Turn your own Kurdish Sorani voice recordings into vertical lesson videos for Arabic and English speakers: AI transcription line by line, AI translation, a review pass, then MP4.",
   "scripts": {
@@ -10,7 +10,7 @@
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "lint": "tsc --noEmit",
-    "test": "tsx tests/segmentation.test.mjs && tsx tests/languages.test.mjs && tsx tests/timeline.test.mjs && tsx tests/transcriptParse.test.mjs"
+    "test": "tsx tests/segmentation.test.mjs && tsx tests/languages.test.mjs && tsx tests/timeline.test.mjs && tsx tests/transcriptParse.test.mjs && tsx tests/cards.test.mjs && tsx tests/clipBuilder.test.mjs && tsx tests/audioPresets.test.mjs && tsx tests/dialogue.test.mjs && tsx tests/subtitles.test.mjs && tsx tests/storyText.test.mjs && tsx tests/aligned.test.mjs && tsx tests/storyLayout.test.mjs && tsx tests/lineEdits.test.mjs && tsx tests/projectStore.test.mjs && tsx tests/serverSecurity.test.mjs && tsx tests/mediaServer.test.mjs && tsx tests/videoRoutes.test.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -18,6 +18,7 @@
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "lucide-react": "^0.546.0",
+    "mammoth": "^1.12.3",
     "multer": "^2.2.0",
     "react": "^19.0.1",
     "react-dom": "^19.0.1"

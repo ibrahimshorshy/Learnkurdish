@@ -14,15 +14,20 @@ import {
   Wand2,
 } from "lucide-react";
 import type { LessonLine, Project } from "../types";
-import type { RecordingAudio, usePlayback } from "../audio/useRecordingAudio";
+import type { LessonAudio, Playback } from "../audio/useRecordingAudio";
+import type { AppSettings } from "../utils/settings";
+import { buildLineClip } from "../audio/clipBuilder";
+import { speakerName } from "../utils/projectStore";
+import LineTakeControls from "./LineTakeControls";
 import AutoTextarea from "./AutoTextarea";
 import { findAudienceLanguage } from "../config/languages";
 import { untranslated } from "../lessonActions";
 
 interface Props {
   project: Project;
-  audio: RecordingAudio | null;
-  playback: ReturnType<typeof usePlayback>;
+  audio: LessonAudio;
+  playback: Playback;
+  settings: AppSettings;
   busy: boolean;
   /** Which line is being re-translated on its own, if any. */
   busyLineId: string | null;
@@ -36,6 +41,7 @@ export default function TranslateStep({
   project,
   audio,
   playback,
+  settings,
   busy,
   busyLineId,
   update,
@@ -55,8 +61,9 @@ export default function TranslateStep({
     update((p) => ({ lines: p.lines.map((l) => (l.id === id ? { ...l, ...patch } : l)), approvedAt: undefined }));
 
   const play = (line: LessonLine) => {
-    if (playback.playing?.key === line.id) playback.stop();
-    else void playback.play(line.id, line.start, line.end);
+    if (playback.playing?.key === line.id) return playback.stop();
+    const clip = buildLineClip(line, audio.sources, project);
+    if (clip) void playback.play(line.id, clip, { start: line.start, end: line.end });
   };
 
   if (!hasAny) {
@@ -126,7 +133,25 @@ export default function TranslateStep({
             index={index}
             audiences={audiences}
             playing={playback.playing?.key === line.id}
-            canPlay={Boolean(audio)}
+            canPlay={Boolean(audio.sources.main || line.take)}
+            tag={
+              project.kind === "dialogue"
+                ? { text: speakerName(project, line.speaker ?? 0), tone: (line.speaker ?? 0) === 0 ? "blue" : "green" }
+                : project.kind === "story" && (line.paragraphStart || index === 0)
+                  ? { text: "¶ New paragraph", tone: "sun" }
+                  : undefined
+            }
+            takeControls={
+              <LineTakeControls
+                line={line}
+                project={project}
+                audio={audio}
+                playback={playback}
+                settings={settings}
+                compact
+                update={update}
+              />
+            }
             busy={busyLineId === line.id}
             disabled={busy}
             onPlay={() => play(line)}
@@ -176,12 +201,16 @@ function LineCard({
   audiences,
   playing,
   canPlay,
+  tag,
+  takeControls,
   busy,
   disabled,
   onPlay,
   onPatch,
   onRetranslate,
 }: {
+  tag?: { text: string; tone: "blue" | "green" | "sun" };
+  takeControls?: React.ReactNode;
   line: LessonLine;
   index: number;
   audiences: NonNullable<ReturnType<typeof findAudienceLanguage>>[];
@@ -213,6 +242,19 @@ function LineCard({
           </button>
         </div>
         <div className="flex-1 min-w-0 space-y-2">
+          {tag && (
+            <span
+              className={`inline-block px-2.5 py-0.5 rounded-full text-xs font-semibold border ${
+                tag.tone === "blue"
+                  ? "bg-brand-blue/20 border-brand-blue/60"
+                  : tag.tone === "green"
+                    ? "bg-brand-green/20 border-brand-green/60"
+                    : "bg-kurd-sun/15 border-kurd-sun/50"
+              }`}
+            >
+              {tag.text}
+            </span>
+          )}
           <AutoTextarea
             dir="rtl"
             lang="ckb"
@@ -227,6 +269,7 @@ function LineCard({
             value={line.transliteration}
             onChange={(e) => onPatch({ transliteration: e.target.value })}
           />
+          {takeControls}
           {changed && (
             <p className="text-xs text-kurd-sun flex flex-wrap items-center gap-x-3 gap-y-1">
               The Kurdish changed after this was translated.

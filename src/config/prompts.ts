@@ -70,14 +70,25 @@ export interface TranslatePromptInput {
    * re-translated. Never translated itself.
    */
   surrounding?: string[];
+  /** What kind of text this is: lesson lines, a dialogue, a story or video subtitles. */
+  kind?: string;
 }
+
+const KIND_NOTES: Record<string, string> = {
+  dialogue:
+    "These lines are a conversation between two people, in the order spoken. Keep forms of address, pronouns and politeness consistent with who is talking to whom.",
+  story:
+    "These lines are consecutive sentences of one story. Translate them so they read as one continuous text — consistent tense, names and pronouns from sentence to sentence.",
+  video: "These lines are subtitles for a video of the teacher speaking, in the order spoken.",
+};
 
 export function translateSystemPrompt(language: TaughtLanguage): string {
   return `You are a professional translator and an experienced teacher of ${language.label} (${language.endonym}) to adults. You translate short spoken lines for subtitles in a language-learning video. You return only JSON matching the requested schema.`;
 }
 
 export function translatePrompt(input: TranslatePromptInput): string {
-  const { language, audiences, lines, note, context, withTitles, surrounding } = input;
+  const { language, audiences, lines, note, context, withTitles, surrounding, kind } = input;
+  const kindNote = kind && KIND_NOTES[kind] ? `\n\n${KIND_NOTES[kind]}` : "";
 
   const perLine = [
     `- "n": the line number, unchanged.`,
@@ -110,7 +121,7 @@ ${note.trim()}`
         .join("\n")}`
     : "";
 
-  return `Below are numbered lines of ${language.variety}. A teacher recorded them for a short video that teaches ${language.label}. Translate every line for learners.
+  return `Below are numbered lines of ${language.variety}. A teacher recorded them for a short video that teaches ${language.label}. Translate every line for learners.${kindNote}
 
 FOR EACH LINE RETURN
 ${perLine}

@@ -1,30 +1,38 @@
 import { useEffect, useState } from "react";
 import { FolderOpen, Trash2, Mic, Film, Plus, Loader2 } from "lucide-react";
 import type { Project } from "../types";
-import { STEPS } from "../types";
+import { KINDS, stepsFor } from "../types";
 import { deleteProject, formatBytes, listProjects, projectLabel } from "../utils/projectStore";
+import { inOrder } from "../utils/projectWrites";
 import { formatTime } from "../audio/audioTools";
 
 interface Props {
   currentId: string | null;
   onOpen: (project: Project) => void;
   onNew: () => void;
-  /** Called after the current project is deleted. */
-  onDeletedCurrent: () => void;
+  /** Called just before the open project is deleted, so it can be closed first. */
+  onDeletingCurrent: () => void;
 }
 
-export default function LibraryTab({ currentId, onOpen, onNew, onDeletedCurrent }: Props) {
+export default function LibraryTab({ currentId, onOpen, onNew, onDeletingCurrent }: Props) {
   const [projects, setProjects] = useState<Project[] | null>(null);
 
-  const refresh = () => listProjects().then(setProjects).catch(() => setProjects([]));
+  // In the same queue as results landing in closed projects, so the list shows them.
+  const refresh = () =>
+    inOrder(listProjects)
+      .then(setProjects)
+      .catch(() => setProjects([]));
   useEffect(() => {
     void refresh();
   }, []);
 
   const remove = async (project: Project) => {
     if (!window.confirm(`Delete “${projectLabel(project)}”? The recording and its videos are deleted too.`)) return;
-    await deleteProject(project.id);
-    if (project.id === currentId) onDeletedCurrent();
+    // Closed first, so its autosave cannot store it again afterwards; and
+    // queued, so a result still landing in it is written before the delete,
+    // or finds it gone — never brings it back.
+    if (project.id === currentId) onDeletingCurrent();
+    await inOrder(() => deleteProject(project.id)).catch(() => {});
     void refresh();
   };
 
@@ -40,14 +48,14 @@ export default function LibraryTab({ currentId, onOpen, onNew, onDeletedCurrent 
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold">Your lessons</h2>
+          <h2 className="text-xl font-bold">Your projects</h2>
           <p className="text-sm text-paper/55">
             Kept on this computer until you delete them — your recordings are not uploaded anywhere except to the AI
             for transcription.
           </p>
         </div>
         <button type="button" className="btn btn-primary" onClick={onNew}>
-          <Plus size={16} /> New lesson
+          <Plus size={16} /> New
         </button>
       </div>
 
@@ -57,13 +65,15 @@ export default function LibraryTab({ currentId, onOpen, onNew, onDeletedCurrent 
         {projects.map((project) => {
           const size =
             (project.recording?.blob.size ?? 0) + project.renders.reduce((sum, r) => sum + r.blob.size, 0);
-          const step = STEPS.find((s) => s.id === project.step);
+          const step = stepsFor(project.kind).find((s) => s.id === project.step);
+          const kind = KINDS.find((k) => k.id === project.kind);
           return (
             <div
               key={project.id}
               className={`card p-4 space-y-3 ${project.id === currentId ? "!border-brand-blue/60" : ""}`}
             >
               <div>
+                <span className="text-[10px] uppercase font-bold tracking-wider text-brand-blue">{kind?.label}</span>
                 <h3 className="font-semibold truncate" title={projectLabel(project)}>
                   {projectLabel(project)}
                 </h3>

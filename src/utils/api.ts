@@ -38,8 +38,14 @@ export async function transcribe(params: {
   context: string;
   model: string;
   apiKey: string;
+  mode?: string;
+  knownLines?: string[];
+  speakers?: string[];
 }): Promise<TranscribeResult> {
   const form = new FormData();
+  if (params.mode) form.append("mode", params.mode);
+  if (params.knownLines?.length) form.append("knownLines", JSON.stringify(params.knownLines));
+  if (params.speakers?.length) form.append("speakers", JSON.stringify(params.speakers));
   form.append("audio", params.wav, "recording.wav");
   form.append("durationSeconds", String(params.durationSeconds));
   form.append("taughtLang", params.taughtLang);
@@ -69,6 +75,7 @@ export async function translate(params: {
   apiKey: string;
   withTitles: boolean;
   surrounding?: string[];
+  kind?: string;
 }): Promise<TranslateResult> {
   const res = await fetch("/api/translate", {
     method: "POST",
@@ -82,6 +89,7 @@ export async function translate(params: {
       model: params.model,
       withTitles: params.withTitles,
       surrounding: params.surrounding,
+      kind: params.kind,
       userApiKey: params.apiKey.trim() || undefined,
     }),
   });
