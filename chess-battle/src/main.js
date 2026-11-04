@@ -95,6 +95,15 @@ $('rec').onclick = () => {
 window.__show = show;
 window.__shot = (t) => { show.seek(t); frame(); return out.toDataURL('image/png'); };
 window.__total = () => show.endT;
+let __n = 0;
+window.__setSize = (w) => setSize(w);
+// Deterministic frame stepping for offline rendering (tools/render-video.mjs): fixed 1/60 s steps.
+window.__frameAt = (step, quality = 0.92) => {
+  if (step < __n) { show.reset(); __n = 0; }
+  while (__n < step) { show.advance(1 / 60, true); __n++; }
+  frame();
+  return out.toDataURL('image/jpeg', quality);
+};
 window.__plan = () => show.plan.map((p) => [p.i, p.a.san, +p.start.toFixed(2), +p.dur.toFixed(2)]);
 if (params.has('t')) { started = true; $('start').style.display = 'none'; show.seek(+params.get('t')); }
 if (params.has('autoplay')) start(true);
