@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { audioContext } from "./audioTools";
+import { RECORDING_IN_PROGRESS, holdLeave } from "../utils/leaveGuard";
 
 export type RecorderState = "idle" | "recording" | "paused";
 
@@ -33,6 +34,11 @@ export function useRecorder(options: { noiseSuppression: boolean }) {
   }, []);
 
   useEffect(() => teardown, [teardown]);
+
+  // Leaving the screen this recorder is on throws the recording away, so the
+  // app asks first while it runs — whichever screen it is on.
+  const live = state !== "idle";
+  useEffect(() => (live ? holdLeave(RECORDING_IN_PROGRESS) : undefined), [live]);
 
   const start = useCallback(async () => {
     setError(null);

@@ -13,22 +13,29 @@ import {
   Loader2,
   StickyNote,
   ArrowRight,
+  Pilcrow,
+  Users,
 } from "lucide-react";
 import type { LessonLine, Project } from "../types";
-import type { RecordingAudio } from "../audio/useRecordingAudio";
-import type { usePlayback } from "../audio/useRecordingAudio";
+import type { LessonAudio, Playback } from "../audio/useRecordingAudio";
+import type { AppSettings } from "../utils/settings";
+import { buildLineClip } from "../audio/clipBuilder";
 import WaveformEditor from "./WaveformEditor";
+import AudioCleanupPanel from "./AudioCleanupPanel";
+import LineTakeControls from "./LineTakeControls";
+import DialogueSpeakers from "./DialogueSpeakers";
 import AutoTextarea from "./AutoTextarea";
 import { formatTime } from "../audio/audioTools";
 import { placeLinesByLength, snapLinesToPauses } from "../audio/segmentation";
-import { mergeLines, splitLine, untranslated } from "../lessonActions";
-import { newId } from "../utils/projectStore";
+import { mergeDropsTakes, mergeLines, removeLine, splitLine, untranslated } from "../lessonActions";
+import { newId, speakerName } from "../utils/projectStore";
 import { AUDIENCE_LANGUAGES } from "../config/languages";
 
 interface Props {
   project: Project;
-  audio: RecordingAudio | null;
-  playback: ReturnType<typeof usePlayback>;
+  audio: LessonAudio;
+  playback: Playback;
+  settings: AppSettings;
   enabledAudiences: string[];
   busy: boolean;
   update: (patch: Partial<Project> | ((p: Project) => Partial<Project>)) => void;
@@ -41,15 +48,19 @@ export default function TranscriptStep({
   project,
   audio,
   playback,
+  settings,
   enabledAudiences,
   busy,
   update,
   onTranslate,
 }: Props) {
+  const raw = audio.raw;
   const [selectedId, setSelectedId] = useState<string | null>(project.lines[0]?.id ?? null);
   const caretRef = useRef<Record<string, number>>({});
   const lines = project.lines;
-  const duration = audio?.buffer.duration ?? project.recording?.durationSeconds ?? 0;
+  const duration = raw?.buffer.duration ?? project.recording?.durationSeconds ?? 0;
+  const isDialogue = project.kind === "dialogue";
+  const isStory = project.kind === "story";
 
   const setLines = (next: LessonLine[], manual = true) =>
     update({ lines: next, ...(manual ? { timesSource: "manual" as const } : {}) });
@@ -57,9 +68,11 @@ export default function TranscriptStep({
   const patchLine = (id: string, patch: Partial<LessonLine>) =>
     update((p) => ({ lines: p.lines.map((l) => (l.id === id ? { ...l, ...patch } : l)) }));
 
+  /** Plays the line as the video will have it: its take or slice, cuts out, pauses tightened, cleaned up. */
   const play = (line: LessonLine) => {
-    if (playback.playing?.key === line.id) playback.stop();
-    else void playback.play(line.id, line.start, line.end);
+    if (playback.playing?.key === line.id) return playback.stop();
+    const clip = buildLineClip(line, audio.sources, project);
+    if (clip) void playback.play(line.id, clip, { start: line.start, end: line.end });
   };
 
   const nudge = (index: number, edge: "start" | "end", delta: number) => {
@@ -78,7 +91,9 @@ export default function TranscriptStep({
 
   const split = (index: number) => {
     const line = lines[index];
-    const parts = splitLine(line, caretRef.current[line.id] ?? -1, audio);
+    // A line with its own take has the take split too, at a pause in the take.
+    const takeAudio = line.take ? (audio.sources.takes.get(line.take.id) ?? null) : null;
+    const parts = splitLine(line, caretRef.current[line.id] ?? -1, raw, takeAudio);
     if (!parts) {
       window.alert("Put the cursor where the line should be split, between two words.");
       return;
@@ -89,7 +104,19 @@ export default function TranscriptStep({
 
   const merge = (index: number) => {
     if (index >= lines.length - 1) return;
-    const merged = mergeLines(lines[index], lines[index + 1]);
+    const [a, b] = [lines[index], lines[index + 1]];
+    if (mergeDropsTakes(a, b)) {
+      // A merged line has one sound, so it cannot keep a take that holds only half its words.
+      const both = Boolean(a.take && b.take);
+      const which = both
+        ? `Lines ${index + 1} and ${index + 2} have their own new takes`
+        : `Line ${a.take ? index + 1 : index + 2} has its own new take`;
+      const ok = window.confirm(
+        `${which}. The merged line plays from your main recording, so ${both ? "both takes" : "the take"} will be deleted and your original recording of those words used again. Merge anyway?`
+      );
+      if (!ok) return;
+    }
+    const merged = mergeLines(a, b);
     setLines([...lines.slice(0, index), merged, ...lines.slice(index + 2)]);
     setSelectedId(merged.id);
   };
@@ -97,7 +124,7 @@ export default function TranscriptStep({
   const remove = (index: number) => {
     const line = lines[index];
     if (line.kurdish.trim() && !window.confirm(`Delete line ${index + 1}?`)) return;
-    setLines(lines.filter((_, i) => i !== index));
+    setLines(removeLine(lines, index));
   };
 
   const addAfter = (index: number) => {
@@ -118,18 +145,18 @@ export default function TranscriptStep({
   };
 
   const snapAll = () => {
-    if (!audio) return;
-    const ranges = snapLinesToPauses(lines, audio.analysis);
+    if (!raw) return;
+    const ranges = snapLinesToPauses(lines, raw.analysis);
     setLines(lines.map((l, i) => ({ ...l, ...ranges[i] })), false);
     update({ timesSource: "audio" });
   };
 
   const placeAll = () => {
-    if (!audio) return;
+    if (!raw) return;
     if (!window.confirm("Ignore the current times and place every line again from the pauses in your voice?")) return;
     const ranges = placeLinesByLength(
       lines.map((l) => l.kurdish),
-      audio.analysis
+      raw.analysis
     );
     setLines(lines.map((l, i) => ({ ...l, ...ranges[i] })), false);
     update({ timesSource: "audio" });
@@ -156,7 +183,9 @@ export default function TranscriptStep({
       <section className="card p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-lg font-bold">Transcript — {lines.length} lines</h2>
+            <h2 className="text-lg font-bold">
+              {isStory ? "Sentences" : "Transcript"} — {lines.length} {isStory ? "sentences" : "lines"}
+            </h2>
             <p className="text-xs text-paper/55">
               {project.timesSource === "audio"
                 ? "Line times were placed from the pauses in your voice."
@@ -167,20 +196,23 @@ export default function TranscriptStep({
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button type="button" className="btn btn-ghost" onClick={snapAll} disabled={!audio || !lines.length}>
+            <button type="button" className="btn btn-ghost" onClick={snapAll} disabled={!raw || !lines.length}>
               <Magnet size={15} /> Snap edges to pauses
             </button>
-            <button type="button" className="btn btn-ghost" onClick={placeAll} disabled={!audio || !lines.length}>
+            <button type="button" className="btn btn-ghost" onClick={placeAll} disabled={!raw || !lines.length}>
               <AudioLines size={15} /> Re-place from audio
             </button>
           </div>
         </div>
 
-        {audio && (
+        {raw && (
           <WaveformEditor
-            mono={audio.mono}
+            playback={playback}
+            mono={raw.mono}
             duration={duration}
             lines={lines}
+            cuts={project.kind === "video" ? undefined : project.cuts}
+            onCutsChange={project.kind === "video" ? undefined : (cuts) => update({ cuts })}
             selectedId={selectedId}
             playhead={playback.position}
             onSelect={setSelectedId}
@@ -198,6 +230,23 @@ export default function TranscriptStep({
           />
         )}
       </section>
+
+      <AudioCleanupPanel
+        project={project}
+        audio={audio}
+        playback={playback}
+        update={update}
+        selectedLineId={selectedId}
+      />
+
+      {isDialogue && (
+        <section className="card p-5 space-y-3">
+          <h2 className="text-lg font-bold flex items-center gap-2">
+            <Users size={18} /> Speakers
+          </h2>
+          <DialogueSpeakers project={project} update={update} />
+        </section>
+      )}
 
       <section className="space-y-2">
         {lines.map((line, index) => {
@@ -221,13 +270,54 @@ export default function TranscriptStep({
                     e.stopPropagation();
                     play(line);
                   }}
-                  disabled={!audio}
+                  disabled={!audio.sources.main && !line.take}
                 >
                   {isPlaying ? <Square size={14} fill="currentColor" /> : <Play size={16} fill="currentColor" />}
                 </button>
               </div>
 
               <div className="flex-1 min-w-0 space-y-2">
+                {(isDialogue || isStory) && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {isDialogue &&
+                      [0, 1].map((who) => (
+                        <button
+                          key={who}
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            patchLine(line.id, { speaker: who });
+                          }}
+                          className={`px-2.5 py-1 rounded-full text-xs font-semibold border cursor-pointer transition-colors ${
+                            (line.speaker ?? 0) === who
+                              ? who === 0
+                                ? "bg-brand-blue/25 border-brand-blue text-white"
+                                : "bg-brand-green/25 border-brand-green text-white"
+                              : "border-white/10 text-paper/45 hover:bg-white/5"
+                          }`}
+                        >
+                          {speakerName(project, who)}
+                        </button>
+                      ))}
+                    {isStory && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (index > 0) patchLine(line.id, { paragraphStart: !line.paragraphStart });
+                        }}
+                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold border cursor-pointer transition-colors ${
+                          line.paragraphStart || index === 0
+                            ? "bg-kurd-sun/15 border-kurd-sun/60 text-white"
+                            : "border-white/10 text-paper/45 hover:bg-white/5"
+                        }`}
+                        title={index === 0 ? "The story starts here" : "Start a new paragraph at this sentence"}
+                      >
+                        <Pilcrow size={12} /> {line.paragraphStart || index === 0 ? "New paragraph" : "Same paragraph"}
+                      </button>
+                    )}
+                  </div>
+                )}
                 <AutoTextarea
                   dir="rtl"
                   lang="ckb"
@@ -261,6 +351,14 @@ export default function TranscriptStep({
                     <span className="text-kurd-sun">changed since translation</span>
                   )}
                 </div>
+                <LineTakeControls
+                  line={line}
+                  project={project}
+                  audio={audio}
+                  playback={playback}
+                  settings={settings}
+                  update={update}
+                />
               </div>
 
               <div className="flex sm:grid sm:grid-cols-2 gap-1 shrink-0 justify-end self-start">

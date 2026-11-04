@@ -13,6 +13,25 @@ export function isRtlText(text: string): boolean {
   return RTL_RANGE.test(text || "");
 }
 
+export type TextDirection = "ltr" | "rtl";
+
+/** Letters of the scripts that are written right to left. */
+const RTL_LETTER = /[\p{Script=Arabic}\p{Script=Hebrew}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}]/u;
+const LETTER = /\p{L}/u;
+
+/**
+ * The direction of the first letter that has one — how a browser decides
+ * dir="auto". Digits, punctuation and spaces have none of their own; null
+ * when the text holds no letter at all.
+ */
+export function firstStrongDirection(text: string): TextDirection | null {
+  for (const ch of text || "") {
+    if (!LETTER.test(ch)) continue;
+    return RTL_LETTER.test(ch) ? "rtl" : "ltr";
+  }
+  return null;
+}
+
 export interface LaidOutWord {
   text: string;
   /** Offset from the line's start edge, in the line's reading direction. */
@@ -40,19 +59,25 @@ const MAX_ENTRIES = 400;
 /**
  * Wraps `text` to `maxWidth` under the ctx's current font and caches the result.
  * The caller must set ctx.font before calling — it is part of the cache key.
+ *
+ * The text's direction is right to left when it holds any right-to-left
+ * letter, unless the caller knows better and says so with `direction` (the
+ * story video does, for a translation whose language is known).
  */
 export function layoutText(
   ctx: CanvasRenderingContext2D,
   text: string,
   maxWidth: number,
-  withWords = false
+  withWords = false,
+  direction?: TextDirection
 ): TextLayout {
   const safe = (text || "").toString().trim();
-  const key = `${ctx.font}|${Math.round(maxWidth)}|${withWords ? "w" : "l"}|${safe}`;
+  const forced = direction === "rtl" ? "R" : direction === "ltr" ? "L" : "";
+  const key = `${ctx.font}|${Math.round(maxWidth)}|${withWords ? "w" : "l"}${forced}|${safe}`;
   const hit = cache.get(key);
   if (hit) return hit;
 
-  const isRtl = isRtlText(safe);
+  const isRtl = direction ? direction === "rtl" : isRtlText(safe);
   const lines: LaidOutLine[] = [];
   const lineWordStart: number[] = [];
 
@@ -122,6 +147,8 @@ export interface DrawTextOptions {
   highlightColor?: string;
   /** Number of words already spoken. Words at index < this are highlighted. */
   highlightUpTo?: number;
+  /** The text's direction, when known; otherwise worked out as layoutText does. */
+  direction?: TextDirection;
 }
 
 /**
@@ -138,7 +165,7 @@ export function drawWrappedText(
   options: DrawTextOptions = {}
 ): number {
   const karaoke = options.highlightColor !== undefined && options.highlightUpTo !== undefined;
-  const layout = layoutText(ctx, text, maxWidth, karaoke);
+  const layout = layoutText(ctx, text, maxWidth, karaoke, options.direction);
   if (!layout.lines.length) return 0;
 
   const previousDirection = ctx.direction;

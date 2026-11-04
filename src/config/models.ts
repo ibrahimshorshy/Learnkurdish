@@ -11,7 +11,9 @@
  *
  * There are no speech models here on purpose. The whole point of this app is
  * that the voice is yours: speech models mispronounce Kurdish, so nothing in a
- * lesson is ever synthesized.
+ * lesson is ever synthesized. The only speech in the app is the title and
+ * closing cards, read in the audience's language; those models live in
+ * config/voices.ts.
  */
 
 export type ModelTier = "economy" | "balanced" | "premium";

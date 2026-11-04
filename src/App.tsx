@@ -1,112 +1,350 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Settings, Library, Mic2, Plus, Check, X, Loader2 } from "lucide-react";
-import type { Project, StepId } from "./types";
-import { STEPS } from "./types";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Settings, Library, Mic2, Plus, Check, X, Loader2, Film, MessagesSquare, BookOpen } from "lucide-react";
+import type { Project, ProjectKind, StepId } from "./types";
+import { KINDS, stepsFor } from "./types";
 import { createProject, getProject, projectLabel, saveProject } from "./utils/projectStore";
+import { createProjectWriter, inOrder, recordingSignature, type Patch } from "./utils/projectWrites";
+import { confirmLeave, workInProgress } from "./utils/leaveGuard";
 import { LAST_PROJECT_KEY, loadSettings, saveSettings, type AppSettings } from "./utils/settings";
 import { getHealth, type Health } from "./utils/api";
-import { useRecordingAudio, usePlayback } from "./audio/useRecordingAudio";
+import { useLessonAudio, usePlayback } from "./audio/useRecordingAudio";
 import { transcribeRecording, translateLines } from "./lessonActions";
 import RecordStep from "./components/RecordStep";
+import StorySourceStep from "./components/StorySourceStep";
+import VideoSourceStep from "./components/VideoSourceStep";
 import TranscriptStep from "./components/TranscriptStep";
 import TranslateStep from "./components/TranslateStep";
-import VideoStep from "./components/VideoStep";
+import OutputStep from "./components/OutputStep";
+import SubtitleOutputStep from "./components/SubtitleOutputStep";
 import LibraryTab from "./components/LibraryTab";
 import SettingsPanel from "./components/SettingsPanel";
 
-type Patch = Partial<Project> | ((p: Project) => Partial<Project>);
+type Tab = ProjectKind | "library";
+
+/** An AI step running for one project. */
+interface Job {
+  what: "transcribe" | "translate";
+  /** The one line being re-translated, if that is all it is. */
+  lineId: string | null;
+}
+
+/**
+ * What a write that moves the open project to another step does about work in
+ * progress on the screen it would take away (a recording, a render): "ask"
+ * first, "stay" on this step (for results that land on their own), or "go"
+ * (already asked).
+ */
+type StepChange = "ask" | "stay" | "go";
+
+const KIND_ICONS: Record<ProjectKind, React.ReactNode> = {
+  lesson: <Mic2 size={16} />,
+  video: <Film size={16} />,
+  dialogue: <MessagesSquare size={16} />,
+  story: <BookOpen size={16} />,
+};
+
+const lastKey = (kind: ProjectKind) => `${LAST_PROJECT_KEY}:${kind}`;
+const LAST_TAB_KEY = "leen-kurdish-last-tab";
+
+/** Whether a project has anything worth keeping yet. */
+function hasContent(p: Project): boolean {
+  return Boolean(p.recording || p.lines.length || p.sourceVideo || p.storyText?.trim() || p.script?.length);
+}
+
+/**
+ * 1.0 remembered one project, with no kind; it was a lesson. Moved once to
+ * the lesson's own key, so that after "New lesson" or deleting the lesson the
+ * old one does not come back in its place.
+ */
+function migrateLastProject(): void {
+  try {
+    const legacy = localStorage.getItem(LAST_PROJECT_KEY);
+    if (legacy === null) return;
+    if (localStorage.getItem(lastKey("lesson")) === null) localStorage.setItem(lastKey("lesson"), legacy);
+    localStorage.removeItem(LAST_PROJECT_KEY);
+  } catch {
+    // Blocked storage: there is nothing to remember either way.
+  }
+}
 
 export default function App() {
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [health, setHealth] = useState<Health | null>(null);
-  const [tab, setTab] = useState<"studio" | "library">("studio");
+  const [tab, setTab] = useState<Tab>(() => {
+    migrateLastProject();
+    const saved = localStorage.getItem(LAST_TAB_KEY) as Tab | null;
+    return saved && (saved === "library" || KINDS.some((k) => k.id === saved)) ? saved : "lesson";
+  });
   const [showSettings, setShowSettings] = useState(false);
-  const [project, setProject] = useState<Project | null>(null);
-  const [busy, setBusy] = useState<null | "transcribe" | "translate">(null);
-  const [busyLineId, setBusyLineId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [project, setProjectState] = useState<Project | null>(null);
+  /** AI steps running, by project: each project shows only its own. */
+  const [jobs, setJobs] = useState<Record<string, Job>>({});
+  /** The error shown, and the project it is about (null: not about one). */
+  const [error, setError] = useState<{ projectId: string | null; message: string } | null>(null);
 
-  const { audio, error: audioError } = useRecordingAudio(project?.recording);
-  const playback = usePlayback(audio);
+  const playback = usePlayback();
 
   /* ---------- settings and server status ---------- */
 
   useEffect(() => saveSettings(settings), [settings]);
-
   useEffect(() => {
     void getHealth().then(setHealth);
   }, [showSettings]);
+  useEffect(() => {
+    localStorage.setItem(LAST_TAB_KEY, tab);
+  }, [tab]);
 
-  /* ---------- the open project ---------- */
+  /* ---------- the open project, one per kind ---------- */
+
+  // Set the moment another project is opened, not on the next render, so
+  // work that finishes in between already sees which project is open.
+  const projectRef = useRef<Project | null>(null);
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  const saveTimer = useRef<number | null>(null);
+  /** Bumped by every choice of project, so a slower load cannot overrule a newer choice. */
+  const loadSeq = useRef(0);
+
+  const cancelAutosave = useCallback(() => {
+    if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = null;
+  }, []);
+
+  /** Saves the open project now, rather than after the autosave pause. */
+  const flushSave = useCallback(() => {
+    cancelAutosave();
+    const p = projectRef.current;
+    if (p && hasContent(p)) void saveProject(p).catch(() => {});
+  }, [cancelAutosave]);
+
+  /**
+   * Makes `next` the open project. The one it replaces is saved first, unless
+   * it is being deleted. An error stays only if it is about `next`.
+   */
+  const showProject = useCallback(
+    (next: Project | null, savePrevious = true) => {
+      const prev = projectRef.current;
+      if (prev && prev.id !== next?.id) {
+        if (savePrevious) flushSave();
+        else cancelAutosave();
+      }
+      projectRef.current = next;
+      setProjectState(next);
+      setError((e) => (e?.projectId && e.projectId === next?.id ? e : null));
+    },
+    [flushSave, cancelAutosave]
+  );
+
+  // Results that land after an await go into the project they were started
+  // for: in memory if it is still open, else into its saved copy.
+  const writer = useMemo(
+    () =>
+      createProjectWriter({
+        current: () => projectRef.current,
+        commit: (next) => {
+          projectRef.current = next;
+          setProjectState(next);
+        },
+        load: getProject,
+        save: saveProject,
+      }),
+    []
+  );
+
+  /** Writes into project `projectId`, open or not. See StepChange for `stepChange`. */
+  const writeProject = useCallback(
+    (projectId: string, patch: Patch, stepChange: StepChange = "ask") =>
+      writer(projectId, (p) => {
+        const changes = typeof patch === "function" ? patch(p) : patch;
+        const leaves = changes.step !== undefined && changes.step !== p.step && projectRef.current?.id === p.id;
+        if (leaves && stepChange !== "go" && workInProgress().length && (stepChange === "stay" || !confirmLeave())) {
+          const { step: _step, ...rest } = changes;
+          return rest;
+        }
+        return changes;
+      }).catch((err) => {
+        setError({ projectId, message: `Could not save to this browser: ${err?.message || err}` });
+        return null;
+      }),
+    [writer]
+  );
+
+  // What the steps get as `update`: bound to the project they show, so a step
+  // that awaits something (an upload, a recording, a voice, a render) writes
+  // into the project it was working on even if another is open by then. The
+  // studio below is keyed by the project, so no step outlives its project.
+  const openId = project?.id ?? null;
+  const update = useMemo(
+    () => (patch: Patch) => {
+      if (openId) void writeProject(openId, patch);
+    },
+    [openId, writeProject]
+  );
+
+  /** Opens the last project of `kind`, or a fresh one. */
+  const loadKind = useCallback(
+    (kind: ProjectKind) => {
+      const seq = ++loadSeq.current;
+      // Queued behind any result still being written into a closed project.
+      void inOrder(async () => {
+        const lastId = localStorage.getItem(lastKey(kind));
+        const found = lastId ? await getProject(lastId).catch(() => null) : null;
+        // Another tab or project was chosen while this one loaded.
+        if (seq !== loadSeq.current || tabRef.current !== kind) return;
+        showProject(found && found.kind === kind ? found : createProject(kind, loadSettings().audiences));
+      });
+    },
+    [showProject]
+  );
 
   useEffect(() => {
-    const lastId = localStorage.getItem(LAST_PROJECT_KEY);
-    (lastId ? getProject(lastId) : Promise.resolve(null))
-      .catch(() => null)
-      .then((found) => setProject(found ?? createProject(loadSettings().audiences)));
-  }, []);
+    const kind = tab === "library" ? null : tab;
+    if (!kind) return;
+    if (projectRef.current?.kind === kind) {
+      // Back on the open project's tab: a load still running for another tab is void.
+      loadSeq.current++;
+      return;
+    }
+    playback.stop();
+    loadKind(kind);
+  }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const update = useCallback((patch: Patch) => {
-    setProject((p) => (p ? { ...p, ...(typeof patch === "function" ? patch(p) : patch), updatedAt: Date.now() } : p));
-  }, []);
+  // Cleaned-up audio is stored in the project it was made for, so it survives
+  // a reload and a video made before cleaning finished is flagged as old.
+  const audio = useLessonAudio(project, writeProject);
 
   // Autosave, a moment after the last change. A project with nothing in it yet
-  // is not saved, so opening the app does not litter the library.
-  const saveTimer = useRef<number | null>(null);
+  // is not saved, so opening a section does not litter the library.
   useEffect(() => {
-    if (!project) return;
-    if (!project.recording && !project.lines.length) return;
-    localStorage.setItem(LAST_PROJECT_KEY, project.id);
-    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    cancelAutosave();
+    if (!project || !hasContent(project)) return;
+    localStorage.setItem(lastKey(project.kind), project.id);
     saveTimer.current = window.setTimeout(() => {
-      saveProject(project).catch((err) => setError(`Could not save to this browser: ${err?.message || err}`));
+      saveTimer.current = null;
+      saveProject(project).catch((err) =>
+        setError({ projectId: project.id, message: `Could not save to this browser: ${err?.message || err}` })
+      );
     }, 400);
-  }, [project]);
+  }, [project, cancelAutosave]);
 
-  const newLesson = () => {
+  useEffect(() => {
+    const onUnload = (e: BeforeUnloadEvent) => {
+      flushSave();
+      // A recording, render or upload in progress would be lost: the browser asks.
+      if (workInProgress().length) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", onUnload);
+    return () => window.removeEventListener("beforeunload", onUnload);
+  }, [flushSave]);
+
+  const chooseTab = (next: Tab) => {
+    if (next === tab) {
+      // Only if a load went missing: the tab's project is not the open one.
+      if (next !== "library" && projectRef.current?.kind !== next && confirmLeave()) loadKind(next);
+      return;
+    }
+    if (!confirmLeave()) return;
+    // The Library lists what is saved, so the open project is saved first.
+    if (next === "library") flushSave();
+    setTab(next);
+  };
+
+  const newProject = () => {
+    if (!confirmLeave()) return;
+    const current = projectRef.current;
+    const kind = tab === "library" ? current?.kind ?? "lesson" : tab;
+    loadSeq.current++;
     playback.stop();
-    setProject(createProject(settings.audiences, project?.video));
-    localStorage.removeItem(LAST_PROJECT_KEY);
-    setTab("studio");
-    setError(null);
+    showProject(createProject(kind, settings.audiences, current?.kind === kind ? current.video : undefined));
+    localStorage.removeItem(lastKey(kind));
+    setTab(kind);
   };
 
   const openProject = (p: Project) => {
-    playback.stop();
-    setProject(p);
-    localStorage.setItem(LAST_PROJECT_KEY, p.id);
-    setTab("studio");
-    setError(null);
+    // Already open: the copy in memory is newer than the list's, which was
+    // read when the Library opened.
+    if (p.id === projectRef.current?.id) {
+      setTab(p.kind);
+      return;
+    }
+    if (!confirmLeave()) return;
+    const seq = ++loadSeq.current;
+    void inOrder(async () => {
+      // Read again: a result that landed in it since the list was read is in the saved copy.
+      const fresh = await getProject(p.id).catch(() => p);
+      if (seq !== loadSeq.current || !fresh) return;
+      playback.stop();
+      showProject(fresh);
+      localStorage.setItem(lastKey(fresh.kind), fresh.id);
+      setTab(fresh.kind);
+    });
   };
 
   /* ---------- AI steps ---------- */
 
+  const startJob = (projectId: string, job: Job) => {
+    setJobs((all) => ({ ...all, [projectId]: job }));
+    setError((e) => (!e || !e.projectId || e.projectId === projectId ? null : e));
+  };
+  const endJob = (projectId: string) =>
+    setJobs((all) => {
+      const { [projectId]: _done, ...rest } = all;
+      return rest;
+    });
+  const failJob = (projectId: string, err: unknown) =>
+    setError({ projectId, message: err instanceof Error ? err.message : String(err) });
+
   const runTranscribe = async () => {
-    if (!project || !audio) return;
-    setBusy("transcribe");
-    setError(null);
+    const source = audio.sources.main ?? audio.raw;
+    if (!project || !source || jobs[project.id]) return;
+    const started = project;
+    const projectId = started.id;
+    // Which recording was heard. If it is replaced before the answer comes,
+    // the answer's lines and times belong to audio that is gone.
+    const heard = recordingSignature(started.recording);
+    startJob(projectId, { what: "transcribe", lineId: null });
     try {
-      update(await transcribeRecording(project, audio, settings));
+      const apply = await transcribeRecording(started, source, settings);
+      let replaced = false;
+      await writeProject(
+        projectId,
+        (p) => {
+          if (recordingSignature(p.recording) !== heard) {
+            replaced = true;
+            return {};
+          }
+          return apply(p);
+        },
+        "stay"
+      );
+      if (replaced) {
+        failJob(
+          projectId,
+          "The recording was replaced while the old one was being transcribed, so those lines were not used. Transcribe the new one."
+        );
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      failJob(projectId, err);
     } finally {
-      setBusy(null);
+      endJob(projectId);
     }
   };
 
   const runTranslate = async (ids?: string[], instruction?: string) => {
-    if (!project) return;
-    setBusy("translate");
-    setBusyLineId(ids?.length === 1 ? ids[0] : null);
-    setError(null);
+    if (!project || jobs[project.id]) return;
+    const started = project;
+    const projectId = started.id;
+    startJob(projectId, { what: "translate", lineId: ids?.length === 1 ? ids[0] : null });
     try {
-      const apply = await translateLines(project, settings, { onlyIds: ids, instruction });
-      update((p) => ({ ...apply(p), ...(ids ? {} : { step: "translate" as StepId }) }));
+      const apply = await translateLines(started, settings, { onlyIds: ids, instruction });
+      await writeProject(projectId, (p) => ({ ...apply(p), ...(ids ? {} : { step: "translate" as StepId }) }), "stay");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      failJob(projectId, err);
     } finally {
-      setBusy(null);
-      setBusyLineId(null);
+      endJob(projectId);
     }
   };
 
@@ -126,39 +364,49 @@ export default function App() {
     }
   };
 
-  const goTo = (step: StepId) => {
-    if (!reachable(step)) return;
+  // Never sit on a step whose inputs are gone.
+  const step: StepId = project && reachable(project.step) ? project.step : "record";
+
+  const goTo = (target: StepId) => {
+    if (!project || !reachable(target)) return;
+    // Another step unmounts this one, and whatever it is recording or rendering.
+    if (target !== step && !confirmLeave()) return;
     playback.stop();
-    update({ step });
+    if (target !== project.step) void writeProject(project.id, { step: target }, "go");
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  // Never sit on a step whose inputs are gone.
-  const step: StepId = project && reachable(project.step) ? project.step : "record";
-  const stepIndex = STEPS.findIndex((s) => s.id === step);
+  const job = project ? jobs[project.id] : undefined;
+  const shownError = error && (!error.projectId || error.projectId === project?.id) ? error.message : null;
+  const steps = stepsFor(project?.kind ?? "lesson");
+  const stepIndex = steps.findIndex((s) => s.id === step);
   const logoSrc = settings.logoDataUrl || "/logo.png";
+  const showStudio = tab !== "library" && project?.kind === tab;
 
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-40 border-b border-white/10 bg-[#03101f]/85 backdrop-blur-md">
-        <div className="max-w-6xl mx-auto px-4 h-16 flex items-center gap-4">
+        <div className="max-w-6xl mx-auto px-4 h-16 flex items-center gap-3">
           <img src="/logo.svg" alt="Leen" className="h-8 w-auto" />
-          <div className="leading-tight">
+          <div className="leading-tight hidden md:block">
             <div className="font-bold">Kurdish Studio</div>
             <div className="text-[11px] text-paper/55">
               <span className="script">سۆرانی</span> → Arabic · English
             </div>
           </div>
-          <nav className="ml-auto flex items-center gap-1">
-            <TabButton active={tab === "studio"} onClick={() => setTab("studio")}>
-              <Mic2 size={16} /> Studio
-            </TabButton>
-            <TabButton active={tab === "library"} onClick={() => setTab("library")}>
-              <Library size={16} /> Library
+          <nav className="ml-auto flex items-center gap-1 overflow-x-auto">
+            {KINDS.map((k) => (
+              <TabButton key={k.id} active={tab === k.id} onClick={() => chooseTab(k.id)} title={k.blurb}>
+                {KIND_ICONS[k.id]} <span className="hidden sm:inline">{k.label}</span>
+              </TabButton>
+            ))}
+            <span className="w-px h-6 bg-white/10 mx-1" />
+            <TabButton active={tab === "library"} onClick={() => chooseTab("library")} title="Every project you made">
+              <Library size={16} /> <span className="hidden sm:inline">Library</span>
             </TabButton>
             <button
               type="button"
-              className="icon-btn !w-10 !h-10 ml-1 relative"
+              className="icon-btn !w-10 !h-10 ml-1 relative shrink-0"
               title="Settings"
               onClick={() => setShowSettings(true)}
             >
@@ -176,35 +424,44 @@ export default function App() {
           <LibraryTab
             currentId={project?.id ?? null}
             onOpen={openProject}
-            onNew={newLesson}
-            onDeletedCurrent={newLesson}
+            onNew={newProject}
+            onDeletingCurrent={() => {
+              const current = projectRef.current;
+              if (!current) return;
+              loadSeq.current++;
+              localStorage.removeItem(lastKey(current.kind));
+              // Not saved on the way out: it is being deleted, and must not come back.
+              showProject(createProject(current.kind, settings.audiences), false);
+            }}
           />
-        ) : !project ? (
+        ) : !showStudio || !project ? (
           <div className="flex justify-center py-20 text-paper/60">
             <Loader2 className="animate-spin" />
           </div>
         ) : (
-          <>
+          // Keyed by the project: every step starts fresh with it, and work a
+          // step had running belongs to the project it was started on.
+          <Fragment key={project.id}>
             <div className="flex flex-wrap items-center gap-3">
               <input
                 className="bg-transparent text-lg font-semibold outline-none border-b border-transparent focus:border-brand-blue min-w-0 flex-1"
                 placeholder={projectLabel(project)}
                 value={project.name}
                 onChange={(e) => update({ name: e.target.value })}
-                aria-label="Lesson name"
+                aria-label="Project name"
               />
               {project.usage.costUsd > 0 && (
                 <span className="text-xs text-paper/45" title="Estimated from list prices">
                   AI cost so far ≈ ${project.usage.costUsd.toFixed(4)}
                 </span>
               )}
-              <button type="button" className="btn btn-ghost" onClick={newLesson}>
-                <Plus size={15} /> New lesson
+              <button type="button" className="btn btn-ghost" onClick={newProject}>
+                <Plus size={15} /> New {KINDS.find((k) => k.id === project.kind)?.label.toLowerCase()}
               </button>
             </div>
 
             <ol className="grid grid-cols-4 gap-2">
-              {STEPS.map((s, i) => {
+              {steps.map((s, i) => {
                 const active = s.id === step;
                 const done = i < stepIndex;
                 const enabled = reachable(s.id);
@@ -239,33 +496,54 @@ export default function App() {
               })}
             </ol>
 
-            {error && (
+            {shownError && (
               <div className="flex items-start gap-3 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100">
-                <span className="flex-1 whitespace-pre-wrap">{error}</span>
+                <span className="flex-1 whitespace-pre-wrap">{shownError}</span>
                 <button type="button" className="icon-btn !w-6 !h-6" onClick={() => setError(null)}>
                   <X size={14} />
                 </button>
               </div>
             )}
 
-            {step === "record" && (
-              <RecordStep
-                project={project}
-                settings={settings}
-                audio={audio}
-                audioError={audioError}
-                busy={busy === "transcribe"}
-                update={update}
-                onTranscribe={runTranscribe}
-              />
-            )}
+            {step === "record" &&
+              (project.kind === "video" ? (
+                <VideoSourceStep
+                  project={project}
+                  settings={settings}
+                  audio={audio}
+                  busy={job?.what === "transcribe"}
+                  update={update}
+                  onTranscribe={runTranscribe}
+                />
+              ) : project.kind === "story" ? (
+                <StorySourceStep
+                  project={project}
+                  settings={settings}
+                  audio={audio.raw}
+                  audioError={audio.error}
+                  busy={job?.what === "transcribe"}
+                  update={update}
+                  onTranscribe={runTranscribe}
+                />
+              ) : (
+                <RecordStep
+                  project={project}
+                  settings={settings}
+                  audio={audio.raw}
+                  audioError={audio.error}
+                  busy={job?.what === "transcribe"}
+                  update={update}
+                  onTranscribe={runTranscribe}
+                />
+              ))}
             {step === "transcript" && (
               <TranscriptStep
                 project={project}
                 audio={audio}
                 playback={playback}
+                settings={settings}
                 enabledAudiences={settings.audiences}
-                busy={busy !== null}
+                busy={Boolean(job)}
                 update={update}
                 onTranslate={() => runTranslate()}
               />
@@ -275,8 +553,9 @@ export default function App() {
                 project={project}
                 audio={audio}
                 playback={playback}
-                busy={busy !== null}
-                busyLineId={busyLineId}
+                settings={settings}
+                busy={Boolean(job)}
+                busyLineId={job?.lineId ?? null}
                 update={update}
                 onTranslateAll={() => runTranslate()}
                 onTranslateLines={(ids, instruction) => runTranslate(ids, instruction)}
@@ -286,10 +565,29 @@ export default function App() {
                 }}
               />
             )}
-            {step === "video" && (
-              <VideoStep project={project} audio={audio} ffmpeg={health?.ffmpeg ?? null} logoSrc={logoSrc} update={update} />
-            )}
-          </>
+            {step === "video" &&
+              (project.kind === "video" ? (
+                <SubtitleOutputStep
+                  project={project}
+                  sources={audio.sources}
+                  processing={audio.processing.state === "processing"}
+                  settings={settings}
+                  ffmpeg={health?.ffmpeg ?? null}
+                  logoSrc={logoSrc}
+                  update={update}
+                />
+              ) : (
+                <OutputStep
+                  project={project}
+                  sources={audio.sources}
+                  processing={audio.processing.state === "processing"}
+                  settings={settings}
+                  ffmpeg={health?.ffmpeg ?? null}
+                  logoSrc={logoSrc}
+                  update={update}
+                />
+              ))}
+          </Fragment>
         )}
       </main>
 
@@ -303,17 +601,20 @@ export default function App() {
 function TabButton({
   active,
   onClick,
+  title,
   children,
 }: {
   active: boolean;
   onClick: () => void;
+  title?: string;
   children: React.ReactNode;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold cursor-pointer transition-colors ${
+      title={title}
+      className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold cursor-pointer transition-colors shrink-0 ${
         active ? "bg-white/10 text-white" : "text-paper/60 hover:text-white hover:bg-white/5"
       }`}
     >

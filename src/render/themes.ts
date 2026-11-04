@@ -13,7 +13,16 @@
 
 import { BRAND, BRAND_PROGRESS, BRAND_PROGRESS_LIGHT, rgba, mix } from "../config/brand";
 
-export type ThemeId = "midnight" | "aurora" | "studio" | "sun" | "cinematic" | "daylight";
+export type ThemeId =
+  | "emerald"
+  | "amethyst"
+  | "twilight"
+  | "midnight"
+  | "aurora"
+  | "studio"
+  | "sun"
+  | "cinematic"
+  | "daylight";
 
 export interface ThemePalette {
   /** The Kurdish line. */
@@ -135,12 +144,25 @@ function grain(ctx: CanvasRenderingContext2D, opacity: number): CanvasPattern | 
   return grainPattern;
 }
 
-/** Soft blobs are baked once into sprites; a fresh radial gradient per frame is expensive. */
+/**
+ * Soft blobs are baked once into sprites; a fresh radial gradient per frame is
+ * expensive. The cache holds a handful at most (two output sizes' worth), so
+ * switching resolution cannot pile up full-size canvases.
+ */
 const sprites = new Map<string, HTMLCanvasElement>();
+const MAX_SPRITES = 8;
+/** The strongest a gradient theme's glow gets; quieter frames draw its sprite fainter. */
+const GLOW_PEAK = 0.34;
 function blobSprite(color: string, size: number, alpha: number): HTMLCanvasElement {
   const key = `${color}|${size}|${alpha}`;
   const hit = sprites.get(key);
-  if (hit) return hit;
+  if (hit) {
+    // Most recently used last, so the oldest is dropped first.
+    sprites.delete(key);
+    sprites.set(key, hit);
+    return hit;
+  }
+  while (sprites.size >= MAX_SPRITES) sprites.delete(sprites.keys().next().value as string);
   const sprite = document.createElement("canvas");
   sprite.width = size;
   sprite.height = size;
@@ -210,7 +232,129 @@ const KURD = {
 /* Themes                                                               */
 /* ------------------------------------------------------------------ */
 
+/** Deep green for Arabic videos. */
+const EMERALD = { top: "#0B3B2A", mid: "#06291D", bottom: "#021610", glow: "#2FBF71", soft: "#9BE8B9" };
+/** Deep purple for English videos. */
+const AMETHYST = { top: "#2E1650", mid: "#1D0D38", bottom: "#0D0620", glow: "#A86BF0", soft: "#D9C2FF" };
+
+/**
+ * A dark gradient theme built from one hue: a soft glow behind the words, a
+ * slow drifting light, and the palette's text colours derived from the hue so
+ * the translations stay readable on it.
+ */
+function gradientTheme(
+  id: ThemeId,
+  label: string,
+  blurb: string,
+  c: { top: string; mid: string; bottom: string; glow: string; soft: string },
+  accentAlt: string
+): ThemeInfo {
+  return {
+    id,
+    label,
+    blurb,
+    swatch: `linear-gradient(160deg, ${c.top} 0%, ${c.mid} 55%, ${c.bottom} 100%)`,
+    palette: {
+      ...dark,
+      translation: c.soft,
+      translationAlt: BRAND.paper,
+      accent: c.soft,
+      accentAlt,
+      pillFill: rgba(c.glow, 0.12),
+      pillStroke: rgba(c.glow, 0.35),
+      progressStops: [mix(c.glow, c.bottom, 0.4), c.glow, c.soft],
+      textGlow: rgba(c.glow, 0.28),
+    },
+    paintStatic(ctx, w, h, s) {
+      verticalFill(ctx, w, h, [
+        [0, c.top],
+        [0.55, c.mid],
+        [1, c.bottom],
+      ]);
+      radialGlow(ctx, w / 2, h * 0.47, 430 * s, [
+        [0, rgba(c.glow, 0.22)],
+        [0.6, rgba(c.glow, 0.07)],
+        [1, rgba(c.glow, 0)],
+      ]);
+      const pattern = grain(ctx, 0.025);
+      if (pattern) {
+        ctx.fillStyle = pattern;
+        ctx.fillRect(0, 0, w, h);
+      }
+      ambientBorder(ctx, w, h, s, rgba(c.glow, 0.22));
+    },
+    paintDynamic(ctx, w, h, s, elapsed, voice) {
+      const size = Math.round(520 * s);
+      // One sprite at full strength, faded by the voice: a sprite per voice
+      // level would bake (and keep) a new canvas on almost every frame.
+      const sprite = blobSprite(c.glow, size, GLOW_PEAK);
+      const x = w / 2 + Math.sin(elapsed * 0.45) * 90 * s - size / 2;
+      const y = h * 0.3 + Math.cos(elapsed * 0.35) * 60 * s - size / 2;
+      const level = Math.min(1, Math.max(0, voice));
+      ctx.save();
+      ctx.globalAlpha = (0.22 + level * 0.12) / GLOW_PEAK;
+      ctx.drawImage(sprite, x, y);
+      ctx.restore();
+    },
+  };
+}
+
 export const THEMES: Record<ThemeId, ThemeInfo> = {
+  emerald: gradientTheme(
+    "emerald",
+    "Emerald",
+    "Dark green gradient. The default for Arabic videos.",
+    EMERALD,
+    "#F3D27A"
+  ),
+
+  amethyst: gradientTheme(
+    "amethyst",
+    "Amethyst",
+    "Dark purple gradient. The default for English videos.",
+    AMETHYST,
+    "#7FE0C8"
+  ),
+
+  twilight: {
+    id: "twilight",
+    label: "Twilight",
+    blurb: "Green melting into purple. The default when Arabic and English share a video.",
+    swatch: `linear-gradient(160deg, ${EMERALD.top} 0%, ${EMERALD.bottom} 45%, ${AMETHYST.mid} 70%, ${AMETHYST.top} 100%)`,
+    palette: {
+      ...dark,
+      translation: EMERALD.soft,
+      translationAlt: AMETHYST.soft,
+      accent: EMERALD.soft,
+      accentAlt: AMETHYST.soft,
+      pillFill: "rgba(255, 255, 255, 0.08)",
+      pillStroke: rgba(AMETHYST.glow, 0.35),
+      progressStops: [EMERALD.glow, mix(EMERALD.glow, AMETHYST.glow, 0.5), AMETHYST.glow],
+      textGlow: rgba(AMETHYST.glow, 0.22),
+    },
+    paintStatic(ctx, w, h, s) {
+      verticalFill(ctx, w, h, [
+        [0, EMERALD.top],
+        [0.45, "#071A1F"],
+        [1, AMETHYST.mid],
+      ]);
+      radialGlow(ctx, w * 0.25, h * 0.2, 420 * s, [
+        [0, rgba(EMERALD.glow, 0.2)],
+        [1, rgba(EMERALD.glow, 0)],
+      ]);
+      radialGlow(ctx, w * 0.8, h * 0.82, 460 * s, [
+        [0, rgba(AMETHYST.glow, 0.24)],
+        [1, rgba(AMETHYST.glow, 0)],
+      ]);
+      const pattern = grain(ctx, 0.025);
+      if (pattern) {
+        ctx.fillStyle = pattern;
+        ctx.fillRect(0, 0, w, h);
+      }
+      ambientBorder(ctx, w, h, s, "rgba(255, 255, 255, 0.12)");
+    },
+  },
+
   midnight: {
     id: "midnight",
     label: "Midnight",
@@ -413,8 +557,37 @@ export const THEMES: Record<ThemeId, ThemeInfo> = {
   },
 };
 
-export const THEME_ORDER: ThemeId[] = ["sun", "aurora", "midnight", "studio", "cinematic", "daylight"];
-export const DEFAULT_THEME: ThemeId = "sun";
+export const THEME_ORDER: ThemeId[] = [
+  "emerald",
+  "amethyst",
+  "twilight",
+  "sun",
+  "aurora",
+  "midnight",
+  "studio",
+  "cinematic",
+  "daylight",
+];
+export const DEFAULT_THEME: ThemeId = "emerald";
+
+/** The look a video in these languages starts with: green for Arabic, purple for English. */
+const LANGUAGE_THEMES: Record<string, ThemeId> = {
+  ar: "emerald",
+  en: "amethyst",
+  fa: "midnight",
+  tr: "studio",
+};
+
+export function defaultThemeFor(languages: string[]): ThemeId {
+  if (languages.length > 1) return "twilight";
+  return LANGUAGE_THEMES[languages[0]] ?? DEFAULT_THEME;
+}
+
+/** The theme for one output: what was picked for it, else the language default. */
+export function themeFor(themes: Record<string, ThemeId> | undefined, languages: string[]): ThemeId {
+  const picked = themes?.[languages.join("+")];
+  return picked && THEMES[picked] ? picked : defaultThemeFor(languages);
+}
 
 export function resolveTheme(id: string | undefined): ThemeInfo {
   return THEMES[id as ThemeId] ?? THEMES[DEFAULT_THEME];

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chess Battle — Arcade 3D</title>
+<style>
+  :root { color-scheme: dark; --pink:#ff3d8e; --cyan:#19d9ff; --yellow:#ffd23f; --bg:#0a0420; --ink:#f4eeff; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: radial-gradient(circle at 50% 20%, #2a0f5e, var(--bg) 70%); color: var(--ink); font-family: system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 10px; }
+  #stage { position: relative; height: calc(100vh - 120px); max-height: 1100px; aspect-ratio: 9/16; max-width: 100%; border: 3px solid var(--pink); border-radius: 14px; box-shadow: 0 0 30px #ff3d8e88, 0 0 80px #19d9ff44; overflow: hidden; background: #000; }
+  canvas#out { width: 100%; height: 100%; display: block; }
+  #start { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(10,4,32,.82); text-align: center; padding: 24px; }
+  #start button { font: 700 26px/1 Impact, "Arial Black", sans-serif; letter-spacing: .04em; color: #12062e; background: var(--yellow); border: 0; border-radius: 12px; padding: 18px 34px; cursor: pointer; box-shadow: 0 6px 0 #c9971c, 0 0 30px #ffd23f88; }
+  #start p { margin: 14px 0 0; opacity: .8; font-size: 14px; }
+  #bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center; font-size: 14px; }
+  #bar button, #bar select { background: #1d1048; color: var(--ink); border: 1px solid #5a3fd0; border-radius: 8px; padding: 8px 12px; font-size: 14px; cursor: pointer; }
+  #bar button.rec { background: #b0123f; border-color: #ff3b5c; }
+  #bar button:disabled { opacity: .45; cursor: default; }
+  #scrub { width: min(520px, 90vw); accent-color: var(--pink); }
+  #msg { min-height: 1.2em; font-size: 13px; opacity: .85; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="out" width="540" height="960"></canvas>
+  <div id="start"><div><button id="go">▶ START BATTLE</button><p>Click to start (browsers need a click to play sound).</p></div></div>
+</div>
+<div id="bar">
+  <button id="play">⏸ Pause</button>
+  <button id="restart">⟲ Restart</button>
+  <input id="scrub" type="range" min="0" max="1000" value="0">
+  <label>Pace <select id="pace"><option value="1">Full (~75s)</option><option value="1.15" selected>Fast (~65s)</option><option value="1.4">Quick (~55s)</option><option value="1.8">Teaser (~45s)</option></select></label>
+  <label>Quality <select id="qual"><option value="540">Preview 540×960</option><option value="1080">HD 1080×1920</option></select></label>
+  <label><input type="checkbox" id="snd" checked> Sound</label>
+  <button id="rec" class="rec">● Record video</button>
+</div>
+<div id="msg"></div>
+<script>/*__BUNDLE__*/</script>
+</body>
+</html>

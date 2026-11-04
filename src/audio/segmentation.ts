@@ -102,6 +102,63 @@ function snapEnd(t: number, analysis: SpeechAnalysis, window: number): number {
 }
 
 /**
+ * How far clear of both of the model's edges speech must lie for it to count
+ * as left out on purpose rather than as an edge the model misjudged. The
+ * model's times are often a few hundred milliseconds out and on a slow reading
+ * can be most of a second, and a word dropped from a clip is far worse than a
+ * stumble kept in one, so this allows for the whole second.
+ */
+export const LEFT_OUT_MARGIN = 1.0;
+
+/**
+ * How long the silence on each side of that speech must be. A first or last
+ * word set off by a comma looks just like a false start to the model's times;
+ * a pause this long is a break between sentences, not a comma.
+ */
+export const LEFT_OUT_PAUSE = 0.6;
+
+/**
+ * The speech the model left out between two lines, as the first and last
+ * index into `runs`, or null if there is none. The transcription prompts tell
+ * the model to leave out a false start, a remark or a cough (and, in a
+ * dialogue, a speaker's name read out before a line), so speech there belongs
+ * to neither line.
+ *
+ * Only speech clearly apart from both lines counts: wholly inside the gap,
+ * clear of both of the model's edges, and with a long pause either side. A
+ * word dropped from a lesson clip is worse than a stumble left in one, so
+ * anything less certain is left to the lines: a run in the gap set off from
+ * its line only by a short pause stays with that line, and with nothing
+ * certain at all the shared-pause logic keeps everything.
+ */
+function speechLeftOut(
+  runs: SpeechSegment[],
+  gapStart: number,
+  gapEnd: number,
+  floor: number
+): { first: number; last: number } | null {
+  const from = Math.max(floor, gapStart + LEFT_OUT_MARGIN);
+  const to = gapEnd - LEFT_OUT_MARGIN;
+  let first = -1;
+  let last = -1;
+  // The runs inside the gap are consecutive, so everything from `first` to
+  // `last` is inside it too.
+  runs.forEach((r, k) => {
+    if (r.start < from || r.end > to) return;
+    const before = k > 0 ? r.start - runs[k - 1].end : Infinity;
+    const after = k + 1 < runs.length ? runs[k + 1].start - r.end : Infinity;
+    if (first < 0 && before >= LEFT_OUT_PAUSE) first = k;
+    if (first >= 0 && after >= LEFT_OUT_PAUSE) last = k;
+  });
+  return first >= 0 && last >= first ? { first, last } : null;
+}
+
+/** Whether any speech falls inside `range`. */
+function holdsSpeech(runs: SpeechSegment[], range: TimeRange): boolean {
+  return runs.some((r) => r.end > range.start && r.start < range.end);
+}
+
+/**
  * Moves every boundary between two lines into the pause the model most
  * plausibly meant, then trims each line to its speech.
  *
@@ -110,6 +167,14 @@ function snapEnd(t: number, analysis: SpeechAnalysis, window: number): number {
  * and long — a sentence break is usually the longest silence nearby. A pause
  * can only be used once, and boundaries only move forward, so lines cannot
  * cross.
+ *
+ * Where the model's gap between two lines holds speech it clearly left out (a
+ * stumble, "sorry, again", a word to someone in the room; see speechLeftOut),
+ * the two lines do not share a pause: each edge snaps to its own line's
+ * speech, and the left-out part stays out of both clips instead of playing
+ * while one of them is on screen. That is only decided when the model's times
+ * for both lines hold speech: a line timed over silence has wrong times, and
+ * the speech in the gap next to it is most likely the line itself.
  */
 export function snapLinesToPauses(
   lines: TimeRange[],
@@ -123,9 +188,28 @@ export function snapLinesToPauses(
 
   const out = lines.map((l) => ({ start: l.start, end: l.end }));
   const pauses = pausesOf(analysis);
+  const runs = runsOf(analysis);
 
   let floor = 0;
   for (let i = 0; i + 1 < n; i++) {
+    const leftOut =
+      holdsSpeech(runs, lines[i]) && holdsSpeech(runs, lines[i + 1])
+        ? speechLeftOut(runs, out[i].end, out[i + 1].start, floor)
+        : null;
+    if (leftOut) {
+      // Speech between a model edge and what was left out is that line's own
+      // (the edge was a little out), so the clip reaches to it. The long
+      // pauses either side keep the padded edges out of the left-out speech.
+      const before = leftOut.first > 0 ? runs[leftOut.first - 1].end : -Infinity;
+      const after = leftOut.last + 1 < runs.length ? runs[leftOut.last + 1].start : Infinity;
+      const end = Math.max(floor, snapEnd(Math.max(out[i].end, before), analysis, window));
+      const start = Math.max(end, snapStart(Math.min(out[i + 1].start, after), analysis, window));
+      out[i].end = end;
+      out[i + 1].start = start;
+      floor = start;
+      continue;
+    }
+
     const ideal = (out[i].end + out[i + 1].start) / 2;
     // Never reach past the far end of the following line.
     const ceiling = i + 2 < n ? out[i + 2].start : analysis.duration;

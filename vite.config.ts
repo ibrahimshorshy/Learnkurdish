@@ -25,6 +25,9 @@ export default defineConfig(() => {
       // honest answer and makes the project immune to where it is unzipped.
       postcss: { plugins: [] },
     },
+    // mammoth (for .docx stories) is its own chunk, loaded only when a .docx
+    // is opened; at ~500 kB it would otherwise trip the default warning.
+    build: { chunkSizeWarningLimit: 600 },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
